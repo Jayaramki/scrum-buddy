@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  shiptech-report:
+    build: .
+    ports:
+      - "8501:8501"
+    environment:
+      - AZURE_DEVOPS_PAT=${AZURE_DEVOPS_PAT}
+      - SMTP_SERVER=${SMTP_SERVER}
+      - SMTP_PORT=${SMTP_PORT}
+      - EMAIL_ADDRESS=${EMAIL_ADDRESS}
+      - EMAIL_PASSWORD=${EMAIL_PASSWORD}
+    volumes:
+      - ./app:/app
+    restart: unless-stopped 
