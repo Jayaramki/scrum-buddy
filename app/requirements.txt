@@ -1,9 +1,10 @@
 streamlit>=1.47.0
 flask==2.3.3
 requests==2.31.0
-pandas==2.1.1
+numpy>=1.24.0,<2.0.0
+pandas>=2.1.0,<2.2.0
 openpyxl==3.1.2
 python-dotenv==1.0.0
 flask-cors==4.0.0 
-plotly
-streamlit-aggrid==0.3.4 
+plotly>=5.0.0
+streamlit-aggrid>=0.3.4 
