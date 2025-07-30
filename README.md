@@ -2,6 +2,44 @@
 
 A comprehensive Streamlit-based application for monitoring Azure DevOps projects, generating reports, and tracking sprint progress.
 
+## 🔐 Authentication
+
+**NEW**: Scrum Buddy now includes user authentication to secure access to the application.
+
+### Quick Start (Pre-configured Credentials)
+**Username**: `admin` **Password**: `admin123`
+**Username**: `user` **Password**: `user123`
+
+⚠️ **Important**: Change these credentials for production use!
+
+### Custom User Setup
+
+1. **Generate Password Hashes**:
+   ```bash
+   pip install bcrypt
+   python generate_password_hash.py
+   ```
+
+2. **Add Users to Environment**:
+   Add to your `.env` file:
+   ```bash
+   AUTH_USER_ADMIN=your_bcrypt_hash_here
+   AUTH_USER_JOHN=another_bcrypt_hash_here
+   ```
+
+3. **User Management**:
+   - Username format: `AUTH_USER_<USERNAME>=<BCRYPT_HASH>`
+   - Usernames are case-insensitive
+   - Passwords are securely hashed using bcrypt
+   - Sessions expire when browser is closed
+
+### Security Features
+- 🔒 Secure password hashing with bcrypt
+- 🛡️ Environment-based credential management
+- 🚪 Logout functionality
+- ⚠️ Configuration validation
+- 📱 Responsive login interface
+
 ## 🏗️ Project Structure
 
 This application consists of two main components:
@@ -34,6 +72,7 @@ A dedicated page for real-time sprint monitoring and team performance tracking.
 
 ### Architecture
 - **Framework**: Streamlit with multi-page architecture
+- **Authentication**: Bcrypt-based password authentication with session management
 - **API Integration**: Azure DevOps REST API with authentication
 - **Data Processing**: Pandas for data manipulation and analysis
 - **Visualizations**: Plotly for interactive charts and graphs
@@ -101,6 +140,13 @@ SMTP_SERVER=your_smtp_server
 SMTP_PORT=587
 EMAIL_ADDRESS=your_email@domain.com
 EMAIL_PASSWORD=your_email_password
+
+# Authentication Configuration (Required)
+# Add users using format: AUTH_USER_<username>=<password_hash>
+# Generate password hashes using: python generate_password_hash.py
+# Example users:
+AUTH_USER_ADMIN=$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewsrEzb27FjhEV.6  # password: admin123
+AUTH_USER_USER=$2b$12$GD8zL1Qm4xJ9Y8tR5vN2aO7sE3mP1cK6wH5fB9xJ2vM8qL4tR7sN   # password: user123
 ```
 
 ### Project Configuration
@@ -110,6 +156,12 @@ Projects and work item types are configured via enums in `app/enums.py`:
 - **Iteration Paths**: Set up iteration path options
 
 ## 📋 Usage
+
+### Authentication
+1. **Access Application**: Navigate to the application URL
+2. **Login**: Use your username and password
+3. **Session Management**: Stay logged in until browser is closed
+4. **Logout**: Use the logout button in the sidebar
 
 ### Project Report Generator
 1. **Select Configuration**: Choose project, work item types, and iteration path
@@ -140,6 +192,7 @@ Projects and work item types are configured via enums in `app/enums.py`:
 - **streamlit-aggrid==0.3.4**: Advanced data table component
 - **python-dotenv==1.0.0**: Environment variable management
 - **openpyxl==3.1.2**: Excel file support
+- **bcrypt>=4.0.0**: Secure password hashing for authentication
 
 ## 🐳 Containerization
 
@@ -151,6 +204,8 @@ The application is fully containerized with:
 
 ## 🔒 Security
 
+- **Authentication**: Secure login system with bcrypt password hashing
+- **Session Management**: Browser-based session authentication
 - **Token Management**: Secure Azure DevOps PAT handling
 - **Environment Variables**: Sensitive data stored in environment variables
 - **SSL Verification**: Configurable SSL settings for enterprise environments
@@ -164,3 +219,17 @@ The application integrates with Azure DevOps REST API v7.0 for:
 - Iteration and sprint data
 - Work item relationships and hierarchies
 - Time tracking and progress data 
+
+## 🧑‍💻 User Management
+
+### Adding New Users
+1. **Generate Hash**: Run `python generate_password_hash.py`
+2. **Add to Environment**: Add `AUTH_USER_<USERNAME>=<HASH>` to `.env`
+3. **Restart Application**: Restart the app to load new users
+
+### Security Best Practices
+- Use strong passwords for all accounts
+- Regularly rotate passwords
+- Remove unused user accounts
+- Monitor application access logs
+- Use HTTPS in production environments 

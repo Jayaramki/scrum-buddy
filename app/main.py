@@ -15,12 +15,20 @@ import gzip
 import hashlib
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
 import urllib3
+import bcrypt
 
 # Suppress SSL warnings when verification is disabled
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Load environment variables
-load_dotenv()
+# Load environment variables  
+import os
+# Force load from the correct .env file in app directory - use absolute path
+env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+# Clear any existing AUTH_USER_ variables to avoid conflicts
+for key in list(os.environ.keys()):
+    if key.startswith('AUTH_USER_'):
+        del os.environ[key]
+load_dotenv(env_path, override=True)
 
 # Page configuration
 st.set_page_config(
@@ -29,89 +37,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Custom CSS for consistent styling
-st.markdown("""
-<style>
-    .main-header {
-        text-align: center;
-        color: #1f77b4;
-        margin-bottom: 2rem;
-        font-size: 2.5rem;
-        font-weight: bold;
-    }
-    
-    .metric-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        padding: 1rem;
-        border-radius: 10px;
-        text-align: center;
-        margin: 0.5rem;
-    }
-    
-    .metric-value {
-        font-size: 2rem;
-        font-weight: bold;
-        margin-bottom: 0.5rem;
-    }
-    
-    .metric-label {
-        font-size: 0.9rem;
-        opacity: 0.9;
-    }
-    
-    .section-header {
-        color: #1f77b4;
-        font-size: 1.5rem;
-        font-weight: bold;
-        margin: 1.5rem 0 1rem 0;
-        border-bottom: 2px solid #e0e0e0;
-        padding-bottom: 0.5rem;
-    }
-    
-    .stButton > button {
-        background: linear-gradient(45deg, #667eea, #764ba2);
-        color: white;
-        border: none;
-        border-radius: 10px;
-        padding: 0.75rem 1.5rem;
-        font-weight: bold;
-        font-size: 1.1rem;
-        transition: all 0.3s ease;
-    }
-    
-    .stButton > button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
-    }
-    
-    /* Custom styling for native tabs */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-    }
-    
-    .stTabs [data-baseweb="tab"] {
-        background-color: #f0f2f6;
-        border-radius: 8px 8px 0px 0px;
-        padding: 10px 16px;
-        color: #262730;
-        font-weight: 500;
-    }
-    
-    .stTabs [aria-selected="true"] {
-        background-color: #667eea;
-        color: white;
-    }
-    
-    .stTabs [aria-selected="true"]:hover {
-        background-color: #5a6fd8;
-    }
-    
-    .stTabs [aria-selected="false"]:hover {
-        background-color: #e0e3ea;
-    }
-</style>
-""", unsafe_allow_html=True)
+# No custom styling - using default Streamlit theme
 
 # Azure DevOps Configuration
 import base64
@@ -1281,7 +1207,7 @@ def create_summary_stats(df):
 
 def display_work_items_details_table(df, project_name, api_instance):
     """Display work items details table with filtering options"""
-    st.markdown('<div class="section-header">📋 Work Items Details</div>', unsafe_allow_html=True)
+    st.subheader("📋 Work Items Details")
     
     # Create a container for filtering and display
     with st.container():
@@ -1436,93 +1362,40 @@ def display_metrics(df):
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">{len(tasks_df)}</div>
-            <div class="metric-label">Total Tasks</div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.metric("Total Tasks", len(tasks_df))
     
     with col2:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">{len(requirements_df) + len(change_requests_df)}</div>
-            <div class="metric-label">Requirements & Change Requests</div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.metric("Requirements & Change Requests", len(requirements_df) + len(change_requests_df))
     
     with col3:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">{len(bugs_df)}</div>
-            <div class="metric-label">Total Bugs</div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.metric("Total Bugs", len(bugs_df))
     
     with col4:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">{len(df)}</div>
-            <div class="metric-label">Total Work Items</div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.metric("Total Work Items", len(df))
     
     # Display task-based estimates
     st.subheader("⏱️ Task-Based Estimates")
     col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">{total_original_estimate:.1f}</div>
-            <div class="metric-label">Original Estimate (hrs)</div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.metric("Original Estimate (hrs)", f"{total_original_estimate:.1f}")
     
     with col2:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">{total_estimate:.1f}</div>
-            <div class="metric-label">Total Estimate (hrs)</div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.metric("Total Estimate (hrs)", f"{total_estimate:.1f}")
     
     with col3:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">{total_completed:.1f}</div>
-            <div class="metric-label">Completed Work (hrs)</div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.metric("Completed Work (hrs)", f"{total_completed:.1f}")
     
     with col4:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">{total_remaining:.1f}</div>
-            <div class="metric-label">Remaining Work (hrs)</div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.metric("Remaining Work (hrs)", f"{total_remaining:.1f}")
     
     with col5:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">{progress_percentage:.1f}%</div>
-            <div class="metric-label">Progress</div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.metric("Progress", f"{progress_percentage:.1f}%")
     
     # Progress bar
-    st.markdown(f"""
-    <div style="margin-top: 20px; padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 10px; color: white;">
-        <div style="display: flex; justify-content: space-between; margin-bottom: 10px; font-size: 16px; font-weight: 600;">
-            <span>📈 Sprint Progress: {progress_percentage:.1f}%</span>
-            <span>{total_completed:.1f}h / {total_estimate:.1f}h</span>
-        </div>
-        <div style="width: 100%; height: 12px; background-color: rgba(255,255,255,0.3); border-radius: 6px; overflow: hidden;">
-            <div style="height: 100%; background: linear-gradient(90deg, #28a745 0%, #20c997 100%); border-radius: 6px; width: {progress_percentage:.1f}%; transition: width 0.3s ease;"></div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    st.subheader(f"📈 Sprint Progress: {progress_percentage:.1f}%")
+    st.write(f"**{total_completed:.1f}h / {total_estimate:.1f}h completed**")
+    st.progress(progress_percentage / 100)
     
 
 
@@ -1651,54 +1524,10 @@ def show_task_details(team_member, date, hours):
             show_task_details_dialog(team_member, date, hours)
 
 def main():
-    # Add CSS for metric cards
-    st.markdown("""
-    <style>
-    .metric-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 20px;
-        border-radius: 10px;
-        color: white;
-        text-align: center;
-        margin: 10px 0;
-    }
-    .metric-value {
-        font-size: 24px;
-        font-weight: bold;
-        margin-bottom: 5px;
-    }
-    .metric-label {
-        font-size: 14px;
-        opacity: 0.9;
-    }
+    # Using default Streamlit styling
     
-    /* Custom styling for native tabs */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-    }
-    
-    .stTabs [data-baseweb="tab"] {
-        background-color: #f0f2f6;
-        border-radius: 8px 8px 0px 0px;
-        padding: 10px 16px;
-        color: #262730;
-        font-weight: 500;
-    }
-    
-    .stTabs [aria-selected="true"] {
-        background-color: #667eea;
-        color: white;
-    }
-    
-    .stTabs [aria-selected="true"]:hover {
-        background-color: #5a6fd8;
-    }
-    
-    .stTabs [aria-selected="false"]:hover {
-        background-color: #e0e3ea;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+    # Show logout button
+    show_logout_button()
     
     # Initialize session state for project selection, teams, and iterations
     if 'selected_project' not in st.session_state:
@@ -2135,13 +1964,8 @@ def main():
                                         team_summary.index = team_summary.index + 1
                                         
                                         st.write("**Assigned Tasks:**")
-                                        # Create custom HTML table with "No." header and center-aligned headers
-                                        html_table = team_summary.to_html(escape=False, index=True, index_names=False)
-                                        # Replace the default index header with "No." and add center alignment
-                                        html_table = html_table.replace('<th></th>', '<th style="text-align: center;">No.</th>')
-                                        # Add center alignment to all header cells
-                                        html_table = html_table.replace('<th>', '<th style="text-align: center;">')
-                                        st.write(html_table, unsafe_allow_html=True)
+                                        # Display team summary table
+                                        st.dataframe(team_summary, use_container_width=True)
                                     
                                     # Unassigned tasks summary
                                     if not unassigned_tasks.empty:
@@ -2242,11 +2066,8 @@ def main():
                                 # Display filtered data
                                 if not filtered_data.empty:
                                     st.write(f"Showing {len(filtered_data)} of {len(st.session_state.work_items_data)} work items")
-                                    # Create custom HTML table with "No." header
-                                    html_table = filtered_data.to_html(escape=False, index=True, index_names=False)
-                                    # Replace the default index header with "No."
-                                    html_table = html_table.replace('<th></th>', '<th>No.</th>')
-                                    st.write(html_table, unsafe_allow_html=True)
+                                    # Display work items table
+                                    st.dataframe(filtered_data, use_container_width=True)
                                 else:
                                     st.info("📋 No work items match the selected filters.")
                         
@@ -2650,5 +2471,126 @@ def main():
                                 
                                 st.info("💡 **Purpose:** Export Task 63073's raw API response to debug why it's appearing on the wrong date.")
 
+# Authentication functions
+def hash_password(password: str) -> str:
+    """Hash a password using bcrypt"""
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+def verify_password(password: str, hashed: str) -> bool:
+    """Verify a password against its hash"""
+    return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+
+def load_user_credentials():
+    """Load user credentials from environment variables"""
+    users = {}
+    
+    # Get users from environment variables
+    # Format: AUTH_USER_<username>=<password_hash>
+    for key, value in os.environ.items():
+        if key.startswith('AUTH_USER_'):
+            username = key[10:].lower()  # Remove 'AUTH_USER_' prefix
+            users[username] = value
+    
+    # Require proper environment variable configuration
+    if not users:
+        st.error("❌ No authentication users configured! Please set AUTH_USER_<username> environment variables.")
+        st.info("💡 Example: AUTH_USER_ADMIN=<bcrypt_hash>")
+        st.info("🔧 Use generate_password_hash.py to create password hashes.")
+        st.stop()
+    
+    return users
+
+def authenticate_user(username: str, password: str) -> bool:
+    """Authenticate a user with username and password"""
+    users = load_user_credentials()
+    username_lower = username.lower()
+    
+    if username_lower in users:
+        return verify_password(password, users[username_lower])
+    return False
+
+def show_login_form():
+    """Display the login form"""
+    st.set_page_config(
+        page_title="Scrum Buddy - Login",
+        page_icon="🔐",
+        layout="wide"
+    )
+    
+    # Reduce top spacing by using a container
+    container = st.container()
+    
+    with container:
+        # Center the content
+        col1, col2 = st.columns([2, 2])
+            
+        with col1:
+            st.title("🧠 Scrum Buddy")
+            st.subheader("Sprint Monitoring Dashboard")
+            
+            st.markdown("---")
+
+            st.write("📊 Real-time Sprint Analytics")
+            st.write("📈 Team Performance Insights") 
+            st.write("🔄 Azure DevOps Integration")
+            st.write("📱 Modern Responsive Design")
+        
+        with col2:
+            st.markdown("### Please Login")
+            
+            with st.form("login_form"):
+                username = st.text_input("Username", placeholder="Enter your username")
+                password = st.text_input("Password", type="password", placeholder="Enter your password")
+                submit_button = st.form_submit_button("Sign In", use_container_width=True)
+                
+                if submit_button:
+                    if username and password:
+                        if authenticate_user(username, password):
+                            st.session_state.authenticated = True
+                            st.session_state.username = username
+                            st.success("Login successful! Redirecting...")
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error("Invalid username or password")
+                    else:
+                        st.error("Please enter both username and password")
+        
+
+
+def logout_user():
+    """Logout the current user"""
+    st.session_state.authenticated = False
+    st.session_state.username = None
+    st.rerun()
+
+def check_authentication():
+    """Check if user is authenticated"""
+    return st.session_state.get('authenticated', False)
+
+def show_logout_button():
+    """Show logout button in sidebar"""
+    with st.sidebar:
+        st.markdown("---")
+        st.markdown(f"👤 **Logged in as:** {st.session_state.get('username', 'Unknown')}")
+        if st.button("🚪 Logout", use_container_width=True):
+            logout_user()
+
 if __name__ == "__main__":
-    main() 
+    # Initialize authentication session state
+    if 'authenticated' not in st.session_state:
+        st.session_state.authenticated = False
+    if 'username' not in st.session_state:
+        st.session_state.username = None
+    
+    # Check authentication
+    if not check_authentication():
+        show_login_form()
+    else:
+        # Set page config for authenticated users
+        st.set_page_config(
+            page_title="Sprint Monitoring Dashboard",
+            page_icon="🧠",
+            layout="wide"
+        )
+        main() 
