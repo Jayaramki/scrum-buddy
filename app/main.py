@@ -144,7 +144,7 @@ class ProgressiveLoader:
         
         for idx, (work_item_id, work_item_info) in enumerate(work_item_details.items()):
             try:
-                if status_callback and idx % 10 == 0:  # Update status every 10 items
+                if status_callback:  # Update status for every item
                     status_callback(f"📅 Processing history for work item {idx + 1}/{total_work_items}...")
                 
                 # Get work item history
@@ -1405,7 +1405,12 @@ def display_metrics(df):
     
 
 
+def make_work_item_url(id, org, base_url, project):
+    """Generate work item URL for link columns"""
+    return f"{base_url}/{org}/{project}/_workitems/edit/{id}"
+
 def make_work_item_link(id, org, base_url, project):
+    """Legacy function - kept for backward compatibility"""
     url = f"{base_url}/{org}/{project}/_workitems/edit/{id}"
     return f'<a href="{url}" target="_blank">{id}</a>'
 
@@ -1493,9 +1498,9 @@ def show_task_details_dialog(team_member, date, hours):
     display_df = task_df[['Task_ID', 'Task_Title', 'Hours_Updated', 'Update_Time', 'Task_State']].copy()
     display_df.columns = ['Task ID', 'Task Title', 'Hours Logged', 'Update Time', 'Task State']
     
-    # Make Task ID clickable
+    # Make Task ID clickable by replacing with URLs
     display_df['Task ID'] = display_df['Task ID'].apply(
-                            lambda x: make_work_item_link(x, st.session_state.api_instance.organization, get_config_value("AZURE_DEV_URL"), st.session_state.selected_project)
+                            lambda x: make_work_item_url(x, st.session_state.api_instance.organization, get_config_value("AZURE_DEV_URL"), st.session_state.selected_project)
     )
     
     # Display the tasks
@@ -1505,7 +1510,8 @@ def show_task_details_dialog(team_member, date, hours):
         column_config={
             "Task ID": st.column_config.LinkColumn(
                 "Task ID",
-                help="Click to open work item in Azure DevOps"
+                help="Click to open work item in Azure DevOps",
+                display_text=r".*_workitems/edit/(\d+)$"  # Extract and display just the ID number
             ),
             "Task Title": st.column_config.TextColumn("Task Title", width="large"),
             "Hours Logged": st.column_config.NumberColumn("Hours Logged", format="%.2f"),
@@ -2059,9 +2065,9 @@ def main():
                                 if assignee_filter != 'All':
                                     filtered_data = filtered_data[filtered_data['AssignedTo'] == assignee_filter]
                                 
-                                # Make IDs clickable
+                                # Replace ID column with URLs for proper linking
                                 filtered_data['ID'] = filtered_data['ID'].apply(
-                                    lambda x: make_work_item_link(x, st.session_state.api_instance.organization, get_config_value("AZURE_DEV_URL"), selected_project)
+                                    lambda x: make_work_item_url(x, st.session_state.api_instance.organization, get_config_value("AZURE_DEV_URL"), selected_project)
                                 )
                                 
                                 # Remove date columns and reset index for numbering
@@ -2072,8 +2078,18 @@ def main():
                                 # Display filtered data
                                 if not filtered_data.empty:
                                     st.write(f"Showing {len(filtered_data)} of {len(st.session_state.work_items_data)} work items")
-                                    # Display work items table
-                                    st.dataframe(filtered_data, use_container_width=True)
+                                    # Display work items table with proper link configuration
+                                    st.dataframe(
+                                        filtered_data,
+                                        use_container_width=True,
+                                        column_config={
+                                            "ID": st.column_config.LinkColumn(
+                                                "ID",
+                                                help="Click to open work item in Azure DevOps",
+                                                display_text=r".*_workitems/edit/(\d+)$"  # Extract and display just the ID number
+                                            )
+                                        }
+                                    )
                                 else:
                                     st.info("📋 No work items match the selected filters.")
                         
@@ -2094,8 +2110,8 @@ def main():
                                 def update_status(status):
                                     status_text.text(status)
                                 
-                                # Initialize progressive loader
-                                loader = ProgressiveLoader(chunk_size=50)
+                                # Initialize progressive loader for individual work item processing
+                                loader = ProgressiveLoader(chunk_size=1)
                                 
                                 # Show loading message (will be cleared after completion)
                                 loading_message = st.info("🔄 **Loading fresh data from Azure DevOps API...** This may take a few minutes for large sprints.")
@@ -2269,7 +2285,7 @@ def main():
                                 
                                 # Display the spreadsheet
                                 st.subheader("📊 Daily Progress Tracker (Click on hours to view details)")
-                                st.write("💡 **Click on any hours value to see task details**")
+                                st.info("💡 **Tip:** Click on any hours value in the table above to view detailed task information for that team member and date.")
                                 
                                 # Get the date mapping for reverse lookup
                                 date_mapping = {}
@@ -2405,10 +2421,7 @@ def main():
                                         ".ag-row-selected": {"background-color": "#e3f2fd !important"}
                                     }
                                 )
-                                
-                                # Add helpful instruction
-                                st.info("💡 **Tip:** Click on any hours value in the table above to view detailed task information for that team member and date.")
-                                
+                                                                
                                 # Show summary metrics
                                 st.subheader("📈 Summary Metrics")
                                 col1, col2, col3, col4 = st.columns(4)
