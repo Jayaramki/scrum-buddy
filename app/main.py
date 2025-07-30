@@ -165,12 +165,6 @@ class ProgressiveLoader:
                             update_datetime = datetime.fromisoformat(update_date.replace('Z', '+00:00'))
                             update_date_only = update_datetime.date()
                             
-                            # Debug: Log date extraction for specific tasks
-                            if work_item_id in [63073, 63091, 63114]:  # Debug specific tasks
-                                debug_msg = f"Task {work_item_id}: Raw date='{update_date}', Parsed date={update_date_only}"
-                                if status_callback:
-                                    status_callback(debug_msg)
-                            
                             fields = update.get('fields', {})
                             completed_work_field = fields.get('Microsoft.VSTS.Scheduling.CompletedWork', {})
                             
@@ -222,12 +216,6 @@ class ProgressiveLoader:
                         
                         # Calculate hours logged on the current date
                         hours_logged_on_date = target_completed - previous_completed
-                        
-                        # Debug: Log the calculation for specific tasks
-                        if work_item_id in [63073, 63091, 63114]:  # Debug specific tasks
-                            debug_msg = f"Task {work_item_id}: Date={current_date}, First_Old={first_revision['old_value']}, Last_New={target_completed}, Previous={previous_completed}, Hours={hours_logged_on_date}"
-                            if status_callback:
-                                status_callback(debug_msg)
                         
                         # Only add if hours were actually logged on this date
                         if hours_logged_on_date > 0:
@@ -1048,12 +1036,6 @@ class SprintMonitoringAPI:
                         # Calculate hours logged on the current date
                         hours_logged_on_date = target_completed - previous_completed
                         
-                        # Debug: Log the calculation for specific tasks
-                        if work_item_id in [63073, 63091, 63114]:  # Debug specific tasks
-                            debug_msg = f"Task {work_item_id}: Date={current_date}, First_Old={first_revision['old_value']}, Last_New={target_completed}, Previous={previous_completed}, Hours={hours_logged_on_date}"
-                            if status_callback:
-                                status_callback(debug_msg)
-                        
                         # Only add if hours were actually logged on this date
                         if hours_logged_on_date > 0:
                             task_updates.append({
@@ -1462,10 +1444,6 @@ def create_daily_progress_spreadsheet(task_updates, start_date, end_date):
     
     # Add individual totals column (after renaming)
     pivot_df['Individual Total'] = pivot_df.sum(axis=1)
-    
-    # Add total row at the bottom
-    total_row = pivot_df.sum()
-    pivot_df.loc['Total'] = total_row
     
     return pivot_df, team_members
 
@@ -2303,8 +2281,18 @@ def main():
                                             # Skip if date parsing fails
                                             continue
                                 
-                                # Create a copy of the dataframe for AgGrid
-                                display_df = pivot_df.reset_index()
+                                # Create a copy of the dataframe for AgGrid (filter out any existing Total rows from cached data)
+                                pivot_df_clean = pivot_df[~pivot_df.index.str.contains('Total', case=False, na=False)] if hasattr(pivot_df.index, 'str') else pivot_df
+                                display_df = pivot_df_clean.reset_index()
+                                
+                                # Calculate total row for pinned bottom
+                                total_row = pivot_df_clean.sum()
+                                total_row_dict = {display_df.columns[0]: 'Total'}  # Team Member column
+                                for col in display_df.columns[1:]:  # All other columns
+                                    if col in total_row:
+                                        total_row_dict[col] = total_row[col]
+                                    else:
+                                        total_row_dict[col] = 0
                                 
                                 # Get the actual column name for team member (it might be the index name)
                                 team_member_col = display_df.columns[0]  # First column after reset_index
@@ -2403,7 +2391,8 @@ def main():
                                 gb.configure_grid_options(
                                     domLayout='normal',
                                     suppressRowClickSelection=True,
-                                    suppressCellSelection=False
+                                    suppressCellSelection=False,
+                                    pinnedBottomRowData=[total_row_dict]
                                 )
                                 grid_options = gb.build()
                                 
@@ -2426,16 +2415,19 @@ def main():
                                 st.subheader("📈 Summary Metrics")
                                 col1, col2, col3, col4 = st.columns(4)
                                 
-                                # Exclude 'Individual Total' column from calculations
+                                # Exclude 'Individual Total' column from calculations and filter out any Total rows
                                 daily_columns = [col for col in pivot_df.columns if col != 'Individual Total']
-                                daily_data = pivot_df[daily_columns]
+                                # Filter out any 'Total' rows that might exist in cached data
+                                data_without_totals = pivot_df[~pivot_df.index.str.contains('Total', case=False, na=False)] if hasattr(pivot_df.index, 'str') else pivot_df
+                                daily_data = data_without_totals[daily_columns]
                                 
                                 with col1:
-                                    total_hours = daily_data.loc['Total'].sum()
+                                    total_hours = daily_data.sum().sum()
                                     st.metric("Total Hours Logged", f"{total_hours:.2f}")
                                 
                                 with col2:
-                                    active_days = (daily_data.loc['Total'] > 0).sum()
+                                    daily_totals = daily_data.sum()
+                                    active_days = (daily_totals > 0).sum()
                                     st.metric("Active Days", active_days)
                                 
                                 with col3:
@@ -2445,50 +2437,6 @@ def main():
                                 with col4:
                                     avg_hours_per_day = total_hours / active_days if active_days > 0 else 0
                                     st.metric("Avg Hours/Day", f"{avg_hours_per_day:.2f}")
-                                
-                                # Export functionality
-                                st.subheader("📤 Export Data")
-                                
-                                if st.button("🔍 Export Task 63073 API Response (JSON)", type="primary"):
-                                    try:
-                                        # Get Task 63073 specific data
-                                        task_63073_data = {
-                                            "task_id": 63073,
-                                            "exported_at": datetime.now().isoformat(),
-                                            "sprint_info": {
-                                                "start_date": start_date.isoformat(),
-                                                "end_date": end_date.isoformat()
-                                            },
-                                            "task_updates": [task for task in task_updates if task['Task_ID'] == 63073],
-                                            "raw_api_response": None
-                                        }
-                                        
-                                        # Get raw API response for Task 63073
-                                        if hasattr(st.session_state, 'api_instance'):
-                                            try:
-                                                history_data = st.session_state.api_instance.get_work_item_history([63073], start_date)
-                                                task_63073_data["raw_api_response"] = history_data
-                                            except Exception as e:
-                                                task_63073_data["raw_api_response"] = {"error": str(e)}
-                                        
-                                        # Convert to JSON
-                                        import json
-                                        json_str = json.dumps(task_63073_data, indent=2, default=str)
-                                        
-                                        # Create download button
-                                        st.download_button(
-                                            label="📥 Download Task 63073 JSON",
-                                            data=json_str,
-                                            file_name=f"task_63073_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                                            mime="application/json"
-                                        )
-                                        
-                                        st.success("✅ Task 63073 data exported successfully! Check the JSON to debug the date issue.")
-                                        
-                                    except Exception as e:
-                                        st.error(f"❌ Error exporting Task 63073 data: {str(e)}")
-                                
-                                st.info("💡 **Purpose:** Export Task 63073's raw API response to debug why it's appearing on the wrong date.")
 
 # Authentication functions
 def hash_password(password: str) -> str:
