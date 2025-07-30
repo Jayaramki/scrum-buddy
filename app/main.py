@@ -23,6 +23,19 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # Load environment variables
 load_dotenv()
 
+# Load secrets for Streamlit Cloud compatibility
+def get_config_value(key, default=None):
+    """Get configuration value from Streamlit secrets or environment variables"""
+    try:
+        # Try Streamlit secrets first (for Streamlit Cloud)
+        if hasattr(st, 'secrets') and key in st.secrets:
+            return st.secrets[key]
+    except:
+        pass
+    
+    # Fallback to environment variables (for local development)
+    return os.getenv(key, default)
+
 # Page configuration
 st.set_page_config(
     page_title="Sprint Monitoring Dashboard",
@@ -422,8 +435,8 @@ class CancellableRequest:
 
 class SprintMonitoringAPI:
     def __init__(self, project_name=None):
-        self.pat = os.getenv('AZURE_DEVOPS_PAT')
-        self.organization = os.getenv('ORGANIZATION', 'Inatech')
+        self.pat = get_config_value('AZURE_DEVOPS_PAT')
+        self.organization = get_config_value('AZURE_DEVOPS_ORG', 'Inatech')
         self.project = project_name or "Shiptech"
         self.base_url = f"https://dev.azure.com/{self.organization}"
         self.cancellable_request = CancellableRequest()
@@ -1259,7 +1272,7 @@ def display_work_items_details_table(df, project_name, api_instance):
             # Create a new column with work item URLs for LinkColumn
             # We'll use the ID as both the URL and display text
             filtered_df['WorkItemLink'] = filtered_df['ID'].apply(
-                lambda x: f"{os.getenv('AZURE_DEV_URL')}/{api_instance.organization}/{project_name}/_workitems/edit/{x}"
+                lambda x: f"{get_config_value('AZURE_DEV_URL')}/{api_instance.organization}/{project_name}/_workitems/edit/{x}"
             )
             
             # Remove the original ID column to avoid duplication
@@ -1482,7 +1495,7 @@ def show_task_details_dialog(team_member, date, hours):
     
     # Make Task ID clickable
     display_df['Task ID'] = display_df['Task ID'].apply(
-        lambda x: make_work_item_link(x, st.session_state.api_instance.organization, os.getenv("AZURE_DEV_URL"), st.session_state.selected_project)
+                            lambda x: make_work_item_link(x, st.session_state.api_instance.organization, get_config_value("AZURE_DEV_URL"), st.session_state.selected_project)
     )
     
     # Display the tasks
@@ -2048,7 +2061,7 @@ def main():
                                 
                                 # Make IDs clickable
                                 filtered_data['ID'] = filtered_data['ID'].apply(
-                                    lambda x: make_work_item_link(x, st.session_state.api_instance.organization, os.getenv("AZURE_DEV_URL"), selected_project)
+                                    lambda x: make_work_item_link(x, st.session_state.api_instance.organization, get_config_value("AZURE_DEV_URL"), selected_project)
                                 )
                                 
                                 # Remove date columns and reset index for numbering
@@ -2474,20 +2487,31 @@ def verify_password(password: str, hashed: str) -> bool:
     return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
 
 def load_user_credentials():
-    """Load user credentials from environment variables"""
+    """Load user credentials from Streamlit secrets or environment variables"""
     users = {}
     
-    # Get users from environment variables
-    # Format: AUTH_USER_<username>=<password_hash>
-    for key, value in os.environ.items():
-        if key.startswith('AUTH_USER_'):
-            username = key[10:].lower()  # Remove 'AUTH_USER_' prefix
-            users[username] = value
+    # Check Streamlit secrets first (for Streamlit Cloud)
+    try:
+        if hasattr(st, 'secrets'):
+            for key in st.secrets:
+                if key.startswith('AUTH_USER_'):
+                    username = key[10:].lower()  # Remove 'AUTH_USER_' prefix
+                    users[username] = st.secrets[key]
+    except:
+        pass
     
-    # Require proper environment variable configuration
+    # Fallback to environment variables (for local development)
     if not users:
-        st.error("❌ No authentication users configured! Please set AUTH_USER_<username> environment variables.")
-        st.info("💡 Example: AUTH_USER_ADMIN=<bcrypt_hash>")
+        for key, value in os.environ.items():
+            if key.startswith('AUTH_USER_'):
+                username = key[10:].lower()  # Remove 'AUTH_USER_' prefix
+                users[username] = value
+    
+    # Require proper configuration
+    if not users:
+        st.error("❌ No authentication users configured!")
+        st.info("💡 **For Streamlit Cloud:** Add AUTH_USER_ADMIN=<bcrypt_hash> to your app secrets")
+        st.info("💡 **For Local Development:** Set AUTH_USER_<username> environment variables")
         st.info("🔧 Use generate_password_hash.py to create password hashes.")
         st.stop()
     
