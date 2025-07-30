@@ -20,15 +20,8 @@ import bcrypt
 # Suppress SSL warnings when verification is disabled
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Load environment variables  
-import os
-# Force load from the correct .env file in app directory - use absolute path
-env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
-# Clear any existing AUTH_USER_ variables to avoid conflicts
-for key in list(os.environ.keys()):
-    if key.startswith('AUTH_USER_'):
-        del os.environ[key]
-load_dotenv(env_path, override=True)
+# Load environment variables
+load_dotenv()
 
 # Page configuration
 st.set_page_config(
@@ -2546,11 +2539,8 @@ def show_login_form():
                 if submit_button:
                     if username and password:
                         if authenticate_user(username, password):
-                            st.session_state.authenticated = True
-                            st.session_state.username = username
                             st.success("Login successful! Redirecting...")
-                            time.sleep(1)
-                            st.rerun()
+                            save_authentication(username)
                         else:
                             st.error("Invalid username or password")
                     else:
@@ -2560,9 +2550,7 @@ def show_login_form():
 
 def logout_user():
     """Logout the current user"""
-    st.session_state.authenticated = False
-    st.session_state.username = None
-    st.rerun()
+    clear_authentication()
 
 def check_authentication():
     """Check if user is authenticated"""
@@ -2576,12 +2564,65 @@ def show_logout_button():
         if st.button("🚪 Logout", use_container_width=True):
             logout_user()
 
+def generate_session_token(username):
+    """Generate a simple session token"""
+    import hashlib
+    import time
+    timestamp = str(int(time.time()))
+    token_string = f"{username}:{timestamp}"
+    return hashlib.md5(token_string.encode()).hexdigest()
+
+def validate_session_token(token, username):
+    """Validate session token (basic validation)"""
+    # In a real app, you'd store tokens in a database with expiration
+    # For this demo, we'll just check if it's a valid MD5 hash
+    return len(token) == 32 and token.isalnum()
+
+def save_authentication(username):
+    """Save authentication using URL redirect"""
+    token = generate_session_token(username)
+    st.session_state.auth_token = token
+    st.session_state.authenticated = True
+    st.session_state.username = username
+    # Redirect with token in URL
+    st.query_params.token = token
+    st.query_params.user = username
+    st.rerun()
+
+def clear_authentication():
+    """Clear authentication"""
+    st.session_state.authenticated = False
+    st.session_state.username = None
+    if 'auth_token' in st.session_state:
+        del st.session_state.auth_token
+    # Clear query params
+    st.query_params.clear()
+    st.rerun()
+
+def restore_authentication():
+    """Restore authentication from URL parameters"""
+    query_params = st.query_params
+    if 'token' in query_params and 'user' in query_params:
+        token = query_params['token']
+        username = query_params['user']
+        
+        if validate_session_token(token, username):
+            st.session_state.authenticated = True
+            st.session_state.username = username
+            st.session_state.auth_token = token
+            return True
+    return False
+
 if __name__ == "__main__":
     # Initialize authentication session state
     if 'authenticated' not in st.session_state:
         st.session_state.authenticated = False
     if 'username' not in st.session_state:
         st.session_state.username = None
+    
+    # Try to restore authentication from URL parameters
+    if not st.session_state.authenticated:
+        restore_authentication()
     
     # Check authentication
     if not check_authentication():
