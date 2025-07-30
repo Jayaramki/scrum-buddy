@@ -142,6 +142,10 @@ class ProgressiveLoader:
         task_updates = []
         total_work_items = len(work_item_details)
         
+        # Reset progress to 0 before starting history processing to show actual progress from 0%
+        if progress_callback:
+            progress_callback(0.0)
+        
         for idx, (work_item_id, work_item_info) in enumerate(work_item_details.items()):
             try:
                 if status_callback:  # Update status for every item
@@ -231,8 +235,9 @@ class ProgressiveLoader:
                                 'Task_State': work_item_info['state']
                             })
                 
-                # Update progress for history processing (70% of total progress)
-                progress = 0.3 + (idx + 1) / total_work_items * 0.7
+                # Update progress for history processing (now 0% to 100% for better UX)
+                # Show actual progress from 0% to 100% during history processing
+                progress = (idx + 1) / total_work_items
                 if progress_callback:
                     progress_callback(progress)
                 
@@ -1350,16 +1355,72 @@ def display_metrics(df):
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        st.metric("Total Tasks", len(tasks_df))
+        with st.container():
+            st.markdown("""
+            <div style="
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                padding: 1.5rem;
+                border-radius: 10px;
+                text-align: center;
+                color: white;
+                margin-bottom: 1rem;
+                box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            ">
+                <h2 style="margin: 0; font-size: 2.5rem; font-weight: bold;">{}</h2>
+                <p style="margin: 0; font-size: 1.1rem; opacity: 0.9;">Total Tasks</p>
+            </div>
+            """.format(len(tasks_df)), unsafe_allow_html=True)
     
     with col2:
-        st.metric("Requirements & Change Requests", len(requirements_df) + len(change_requests_df))
+        with st.container():
+            st.markdown("""
+            <div style="
+                background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+                padding: 1.5rem;
+                border-radius: 10px;
+                text-align: center;
+                color: white;
+                margin-bottom: 1rem;
+                box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            ">
+                <h2 style="margin: 0; font-size: 2.5rem; font-weight: bold;">{}</h2>
+                <p style="margin: 0; font-size: 1.1rem; opacity: 0.9;">Requirements & Change Requests</p>
+            </div>
+            """.format(len(requirements_df) + len(change_requests_df)), unsafe_allow_html=True)
     
     with col3:
-        st.metric("Total Bugs", len(bugs_df))
+        with st.container():
+            st.markdown("""
+            <div style="
+                background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+                padding: 1.5rem;
+                border-radius: 10px;
+                text-align: center;
+                color: white;
+                margin-bottom: 1rem;
+                box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            ">
+                <h2 style="margin: 0; font-size: 2.5rem; font-weight: bold;">{}</h2>
+                <p style="margin: 0; font-size: 1.1rem; opacity: 0.9;">Total Bugs</p>
+            </div>
+            """.format(len(bugs_df)), unsafe_allow_html=True)
     
     with col4:
-        st.metric("Total Work Items", len(df))
+        with st.container():
+            st.markdown("""
+            <div style="
+                background: linear-gradient(135deg, #fa709a 0%, #fee140 100%);
+                padding: 1.5rem;
+                border-radius: 10px;
+                text-align: center;
+                color: white;
+                margin-bottom: 1rem;
+                box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            ">
+                <h2 style="margin: 0; font-size: 2.5rem; font-weight: bold;">{}</h2>
+                <p style="margin: 0; font-size: 1.1rem; opacity: 0.9;">Total Work Items</p>
+            </div>
+            """.format(len(df)), unsafe_allow_html=True)
     
     # Display task-based estimates
     st.subheader("⏱️ Task-Based Estimates")
@@ -1369,7 +1430,7 @@ def display_metrics(df):
         st.metric("Original Estimate (hrs)", f"{total_original_estimate:.1f}")
     
     with col2:
-        st.metric("Total Estimate (hrs)", f"{total_estimate:.1f}")
+        st.metric("Completed + Remaining (hrs)", f"{total_estimate:.1f}")
     
     with col3:
         st.metric("Completed Work (hrs)", f"{total_completed:.1f}")
@@ -2263,7 +2324,57 @@ def main():
                                 
                                 # Display the spreadsheet
                                 st.subheader("📊 Daily Progress Tracker (Click on hours to view details)")
-                                st.info("💡 **Tip:** Click on any hours value in the table above to view detailed task information for that team member and date.")
+                                
+                                # Add Export to Excel functionality
+                                col_export, col_info = st.columns([1, 4])
+                                with col_export:
+                                    # Create Excel export functionality
+                                    def create_excel_export():
+                                        from io import BytesIO
+                                        
+                                        # Create a BytesIO buffer for the Excel file
+                                        excel_buffer = BytesIO()
+                                        
+                                        # Create Excel writer object
+                                        with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                                            # Export the daily progress data
+                                            export_df = pivot_df.copy()
+                                            export_df.to_excel(writer, sheet_name='Daily Progress', index=True)
+                                            
+                                            # Create summary sheet
+                                            daily_columns = [col for col in pivot_df.columns if col != 'Individual Total']
+                                            data_without_totals = pivot_df[~pivot_df.index.str.contains('Total', case=False, na=False)] if hasattr(pivot_df.index, 'str') else pivot_df
+                                            daily_data = data_without_totals[daily_columns]
+                                            
+                                            summary_data = {
+                                                'Metric': ['Total Hours Logged', 'Active Days', 'Team Members', 'Avg Hours/Day'],
+                                                'Value': [
+                                                    f"{daily_data.sum().sum():.2f}",
+                                                    str((daily_data.sum() > 0).sum()),
+                                                    str(len(team_members)),
+                                                    f"{daily_data.sum().sum() / (daily_data.sum() > 0).sum() if (daily_data.sum() > 0).sum() > 0 else 0:.2f}"
+                                                ]
+                                            }
+                                            summary_df = pd.DataFrame(summary_data)
+                                            summary_df.to_excel(writer, sheet_name='Summary', index=False)
+                                        
+                                        excel_buffer.seek(0)
+                                        return excel_buffer
+                                    
+                                    # Create download button
+                                    excel_data = create_excel_export()
+                                    current_date = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                    filename = f"daily_progress_tracking_{current_date}.xlsx"
+                                    
+                                    st.download_button(
+                                        label="📥 Export to Excel",
+                                        data=excel_data,
+                                        file_name=filename,
+                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                    )
+                                
+                                with col_info:
+                                    st.info("💡 **Tip:** Click on any hours value in the table above to view detailed task information for that team member and date.")
                                 
                                 # Get the date mapping for reverse lookup
                                 date_mapping = {}
