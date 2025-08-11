@@ -1891,6 +1891,7 @@ def main():
                                     if work_item_details:
                                         df = process_work_item_data(work_item_details)
                                         st.session_state.sprint_data = df
+                                        st.session_state.work_item_details = work_item_details
                                         
                                         # Process parent-child relationships for work items details
                                         status_text.text("🔄 Processing parent-child relationships...")
@@ -1914,6 +1915,9 @@ def main():
                                                 parent_id = int(relation['url'].split('/')[-1])
                                                 parent_ids.add(parent_id)
                                                 child_to_parent_mapping[child_task['id']] = parent_id
+                                        
+                                        # Store the mapping in session state for use in task details modal
+                                        st.session_state.child_to_parent_mapping = child_to_parent_mapping
                                         
                                         st.write(f"📋 Found {len(parent_ids)} unique parent work items")
                                         
@@ -2413,6 +2417,23 @@ def main():
                                 # Get task updates data for JavaScript
                                 task_updates = st.session_state.daily_progress_data.get('task_updates', []) if st.session_state.daily_progress_data else []
                                 
+                                # Get parent work item mapping for tasks
+                                parent_mapping = {}
+                                if hasattr(st.session_state, 'parent_child_data') and st.session_state.parent_child_data is not None:
+                                    # Get the child_to_parent_mapping from session state if available
+                                    if hasattr(st.session_state, 'child_to_parent_mapping'):
+                                        parent_mapping = st.session_state.child_to_parent_mapping
+                                    else:
+                                        # Create parent mapping from work item details if available
+                                        if hasattr(st.session_state, 'work_item_details'):
+                                            for work_item in st.session_state.work_item_details:
+                                                task_id = work_item.get('id')
+                                                relations = work_item.get('relations', [])
+                                                parent_relations = [rel for rel in relations if rel['rel'] == 'System.LinkTypes.Hierarchy-Reverse']
+                                                if parent_relations:
+                                                    parent_id = int(parent_relations[0]['url'].split('/')[-1])
+                                                    parent_mapping[task_id] = parent_id
+                                
                                 # Create a mapping of task-wise hours by team member and date
                                 # Structure (before JSON): { member: { 'MM/DD': { 'taskId': hours_sum } } }
                                 task_mapping = {}
@@ -2434,12 +2455,16 @@ def main():
                                     existing_hours = task_mapping[member_key][date_key].get(task_id, 0.0)
                                     task_mapping[member_key][date_key][task_id] = float(existing_hours) + task_hours
                                 
-                                # Convert inner dicts to list of {id, hours}
+                                # Convert inner dicts to list of {id, hours, parentId}
                                 for _member, _dates in task_mapping.items():
                                     for _date_key, _id_to_hours in _dates.items():
                                         if isinstance(_id_to_hours, dict):
                                             task_mapping[_member][_date_key] = [
-                                                {'id': tid, 'hours': round(hrs, 2)} for tid, hrs in _id_to_hours.items()
+                                                {
+                                                    'id': tid, 
+                                                    'hours': round(hrs, 2),
+                                                    'parentId': parent_mapping.get(int(tid), None)
+                                                } for tid, hrs in _id_to_hours.items()
                                             ]
                                 
                                 # Convert task mapping to JSON for JavaScript
@@ -2600,27 +2625,99 @@ def main():
                                                     p2.innerHTML = `<strong>Date:</strong> ${this.escapeHtml(day)} <span class="sb-badge">Total: ${this.escapeHtml(String(hours))} h</span>`;
                                                     const p3 = document.createElement('p');
                                                     p3.innerHTML = `<strong>Task-wise hours:</strong>`;
-                                                    const list = document.createElement('ul');
-                                                    list.className = 'sb-modal-list';
                                                     
                                                     if (Array.isArray(taskDetails) && taskDetails.length > 0) {
+                                                        const table = document.createElement('table');
+                                                        table.className = 'sb-modal-table';
+                                                        table.style.width = '100%';
+                                                        table.style.borderCollapse = 'collapse';
+                                                        table.style.marginTop = '8px';
+                                                        
+                                                        // Create table header
+                                                        const thead = document.createElement('thead');
+                                                        const headerRow = document.createElement('tr');
+                                                        headerRow.style.backgroundColor = '#f8f9fa';
+                                                        headerRow.style.borderBottom = '2px solid #dee2e6';
+                                                        
+                                                        const headers = ['Parent ID', 'Task ID', 'Hours'];
+                                                        headers.forEach(headerText => {
+                                                            const th = document.createElement('th');
+                                                            th.textContent = headerText;
+                                                            th.style.padding = '8px 12px';
+                                                            th.style.textAlign = 'left';
+                                                            th.style.fontWeight = '600';
+                                                            th.style.borderBottom = '1px solid #dee2e6';
+                                                            headerRow.appendChild(th);
+                                                        });
+                                                        thead.appendChild(headerRow);
+                                                        table.appendChild(thead);
+                                                        
+                                                        // Create table body
+                                                        const tbody = document.createElement('tbody');
                                                         taskDetails.forEach((t) => {
-                                                            const li = document.createElement('li');
+                                                            const tr = document.createElement('tr');
+                                                            tr.style.borderBottom = '1px solid #e9ecef';
+                                                            
+                                                            const parentIdText = t.parentId ? this.escapeHtml(String(t.parentId)) : 'N/A';
                                                             const idText = this.escapeHtml(String(t.id));
                                                             const hrsText = this.escapeHtml(String(t.hours));
-                                                            li.innerHTML = `<strong>Task ${idText}</strong>: ${hrsText} h`;
-                                                            list.appendChild(li);
+                                                            
+                                                            const td1 = document.createElement('td');
+                                                            td1.style.padding = '8px 12px';
+                                                            if (t.parentId) {
+                                                                const link = document.createElement('a');
+                                                                link.href = `https://dev.azure.com/${this.getOrganization()}/${this.getProject()}/_workitems/edit/${t.parentId}`;
+                                                                link.target = '_blank';
+                                                                link.textContent = parentIdText;
+                                                                link.style.textDecoration = 'none';
+                                                                link.style.color = '#0078d4';
+                                                                link.style.fontWeight = '600';
+                                                                td1.appendChild(link);
+                                                            } else {
+                                                                td1.textContent = 'N/A';
+                                                                td1.style.color = '#6c757d';
+                                                                td1.style.fontStyle = 'italic';
+                                                            }
+                                                            
+                                                            const td2 = document.createElement('td');
+                                                            td2.style.padding = '8px 12px';
+                                                            const link = document.createElement('a');
+                                                            link.href = `https://dev.azure.com/${this.getOrganization()}/${this.getProject()}/_workitems/edit/${t.id}`;
+                                                            link.target = '_blank';
+                                                            link.textContent = idText;
+                                                            link.style.textDecoration = 'none';
+                                                            link.style.color = '#0078d4';
+                                                            link.style.fontWeight = '600';
+                                                            td2.appendChild(link);
+                                                            
+                                                            const td3 = document.createElement('td');
+                                                            td3.textContent = hrsText + ' h';
+                                                            td3.style.padding = '8px 12px';
+                                                            td3.style.fontWeight = '600';
+                                                            td3.style.color = '#28a745';
+                                                            
+                                                            tr.appendChild(td1);
+                                                            tr.appendChild(td2);
+                                                            tr.appendChild(td3);
+                                                            tbody.appendChild(tr);
                                                         });
+                                                        table.appendChild(tbody);
+                                                        
+                                                        contentEl.appendChild(p1);
+                                                        contentEl.appendChild(p2);
+                                                        contentEl.appendChild(p3);
+                                                        contentEl.appendChild(table);
                                                     } else {
-                                                        const li = document.createElement('li');
-                                                        li.textContent = 'No tasks found';
-                                                        list.appendChild(li);
+                                                        const p4 = document.createElement('p');
+                                                        p4.textContent = 'No tasks found';
+                                                        p4.style.color = '#6c757d';
+                                                        p4.style.fontStyle = 'italic';
+                                                        
+                                                        contentEl.appendChild(p1);
+                                                        contentEl.appendChild(p2);
+                                                        contentEl.appendChild(p3);
+                                                        contentEl.appendChild(p4);
                                                     }
-                                                    
-                                                    contentEl.appendChild(p1);
-                                                    contentEl.appendChild(p2);
-                                                    contentEl.appendChild(p3);
-                                                    contentEl.appendChild(list);
                                                 }
                                                 
                                                 overlay.style.display = 'flex';
@@ -2640,6 +2737,14 @@ def main():
                                                     .replace(/>/g, '&gt;')
                                                     .replace(/"/g, '&quot;')
                                                     .replace(/'/g, '&#039;');
+                                            }
+                                            
+                                            getOrganization() {
+                                                return '""" + st.session_state.api_instance.organization + """';
+                                            }
+                                            
+                                            getProject() {
+                                                return '""" + st.session_state.api_instance.project + """';
                                             }
                                         }
                                         """)
