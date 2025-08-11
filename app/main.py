@@ -1205,14 +1205,17 @@ def display_work_items_details_table(df, project_name, api_instance):
             st.session_state.state_filter = 'All'
         if 'assigned_filter' not in st.session_state:
             st.session_state.assigned_filter = 'All'
+        if 'iteration_filter' not in st.session_state:
+            st.session_state.iteration_filter = 'All'
         
         # Cache unique values to prevent recalculation
-        if 'unique_states' not in st.session_state or 'unique_assignees' not in st.session_state:
+        if 'unique_states' not in st.session_state or 'unique_assignees' not in st.session_state or 'unique_iterations' not in st.session_state:
             st.session_state.unique_states = ['All'] + sorted(df['State'].unique())
             st.session_state.unique_assignees = ['All'] + sorted(df['AssignedTo'].unique())
+            st.session_state.unique_iterations = ['All'] + sorted(df['IterationPath'].unique())
         
         # Add filtering options with reactive updates
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         with col1:
             # Get unique states and create options
             unique_states = st.session_state.unique_states
@@ -1237,12 +1240,26 @@ def display_work_items_details_table(df, project_name, api_instance):
                 key="assigned_filter"
             )
         
+        with col3:
+            # Get unique iterations and create options
+            unique_iterations = st.session_state.unique_iterations
+            iteration_index = 0 if st.session_state.iteration_filter == 'All' else unique_iterations.index(st.session_state.iteration_filter) if st.session_state.iteration_filter in unique_iterations else 0
+            
+            iteration_filter = st.selectbox(
+                "Filter by Iteration Path",
+                options=unique_iterations,
+                index=iteration_index,
+                key="iteration_filter"
+            )
+        
         # Apply filters efficiently using vectorized operations
         filtered_df = df.copy()
         if state_filter != 'All':
             filtered_df = filtered_df[filtered_df['State'] == state_filter]
         if assigned_filter != 'All':
             filtered_df = filtered_df[filtered_df['AssignedTo'] == assigned_filter]
+        if iteration_filter != 'All':
+            filtered_df = filtered_df[filtered_df['IterationPath'] == iteration_filter]
         
         # Store the filtered data for export
         st.session_state.filtered_data = filtered_df
@@ -2082,7 +2099,7 @@ def main():
                                 st.subheader("📋 Work Items Details")
                                 
                                 # Add filtering options
-                                col1, col2 = st.columns(2)
+                                col1, col2, col3, col4, col5 = st.columns(5)
                                 with col1:
                                     state_filter = st.selectbox(
                                         "Filter by State",
@@ -2091,18 +2108,40 @@ def main():
                                     )
                                 
                                 with col2:
+                                    work_item_type_filter = st.selectbox(
+                                        "Filter by Work Item Type",
+                                        options=['All'] + sorted(st.session_state.work_items_data['WorkItemType'].unique()),
+                                        key="work_item_type_filter_work_items"
+                                    )
+                                
+                                with col3:
                                     assignee_filter = st.selectbox(
                                         "Filter by Assigned To",
                                         options=['All'] + sorted(st.session_state.work_items_data['AssignedTo'].unique()),
                                         key="assignee_filter_work_items"
                                     )
                                 
+                                with col4:
+                                    iteration_filter = st.selectbox(
+                                        "Filter by Iteration Path",
+                                        options=['All'] + sorted(st.session_state.work_items_data['IterationPath'].unique()),
+                                        key="iteration_filter_work_items"
+                                    )
+                                
+                                with col5:
+                                    # Add a spacer or additional filter if needed
+                                    st.write("")  # Empty space for balance
+                                
                                 # Apply filters
                                 filtered_data = st.session_state.work_items_data.copy()
                                 if state_filter != 'All':
                                     filtered_data = filtered_data[filtered_data['State'] == state_filter]
+                                if work_item_type_filter != 'All':
+                                    filtered_data = filtered_data[filtered_data['WorkItemType'] == work_item_type_filter]
                                 if assignee_filter != 'All':
                                     filtered_data = filtered_data[filtered_data['AssignedTo'] == assignee_filter]
+                                if iteration_filter != 'All':
+                                    filtered_data = filtered_data[filtered_data['IterationPath'] == iteration_filter]
                                 
                                 # Replace ID column with URLs for proper linking
                                 filtered_data['ID'] = filtered_data['ID'].apply(
