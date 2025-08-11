@@ -489,7 +489,6 @@ class SprintMonitoringAPI:
         cache_params = {'organization': self.organization}
         cached_data = st.session_state.data_cache.get('projects', cache_params)
         if cached_data is not None:
-            st.info("📦 Using cached projects data")
             return cached_data
         
         # If not in cache, fetch from API
@@ -513,7 +512,6 @@ class SprintMonitoringAPI:
         cache_params = {'organization': self.organization, 'project': self.project}
         cached_data = st.session_state.data_cache.get('teams', cache_params)
         if cached_data is not None:
-            st.info("📦 Using cached teams data")
             return cached_data
         
         # If not in cache, fetch from API
@@ -538,7 +536,6 @@ class SprintMonitoringAPI:
         cache_params = {'organization': self.organization, 'project': self.project, 'team': team_name}
         cached_data = st.session_state.data_cache.get('iterations', cache_params)
         if cached_data is not None:
-            st.info("📦 Using cached iterations data")
             return cached_data
         
         # If not in cache, fetch from API
@@ -1085,7 +1082,6 @@ class SprintMonitoringAPI:
         
         cached_data = st.session_state.data_cache.get('sprint_details', cache_params)
         if cached_data is not None:
-            st.info("📦 Using cached sprint details")
             return cached_data
         
         # If not in cache, fetch from API
@@ -2157,9 +2153,6 @@ def main():
                                 
                                 # Fetch work item history for entire sprint period using progressive loading (tasks only)
                                 try:
-                                    # Debug: Show what tasks we're processing
-                                    st.info(f"🔍 Debug: Processing {len(st.session_state.work_item_ids)} tasks for daily progress tracking")
-                                    
                                     task_updates = loader.load_work_item_history_progressively(
                                         st.session_state.api_instance,
                                         st.session_state.work_item_ids,  # Only tasks for daily progress tracking
@@ -2423,19 +2416,34 @@ def main():
                                 # Get task updates data for JavaScript
                                 task_updates = st.session_state.daily_progress_data.get('task_updates', []) if st.session_state.daily_progress_data else []
                                 
-                                # Create a mapping of task IDs by team member and date
+                                # Create a mapping of task-wise hours by team member and date
+                                # Structure (before JSON): { member: { 'MM/DD': { 'taskId': hours_sum } } }
                                 task_mapping = {}
                                 for task in task_updates:
                                     task_date = pd.to_datetime(task['Date']).date() if isinstance(task['Date'], str) else task['Date']
                                     date_key = task_date.strftime('%m/%d')  # Use MM/DD format to match column headers
                                     member_key = task['Team_Member']
+                                    task_id = str(task.get('Task_ID'))
+                                    try:
+                                        task_hours = float(task.get('Hours_Updated', 0) or 0)
+                                    except Exception:
+                                        task_hours = 0.0
                                     
                                     if member_key not in task_mapping:
                                         task_mapping[member_key] = {}
                                     if date_key not in task_mapping[member_key]:
-                                        task_mapping[member_key][date_key] = []
+                                        task_mapping[member_key][date_key] = {}
                                     
-                                    task_mapping[member_key][date_key].append(str(task['Task_ID']))
+                                    existing_hours = task_mapping[member_key][date_key].get(task_id, 0.0)
+                                    task_mapping[member_key][date_key][task_id] = float(existing_hours) + task_hours
+                                
+                                # Convert inner dicts to list of {id, hours}
+                                for _member, _dates in task_mapping.items():
+                                    for _date_key, _id_to_hours in _dates.items():
+                                        if isinstance(_id_to_hours, dict):
+                                            task_mapping[_member][_date_key] = [
+                                                {'id': tid, 'hours': round(hrs, 2)} for tid, hrs in _id_to_hours.items()
+                                            ]
                                 
                                 # Convert task mapping to JSON for JavaScript
                                 import json
@@ -2456,14 +2464,13 @@ def main():
                                                     this.eGui.style.color = '#262730';
                                                     this.eGui.addEventListener('click', (event) => {
                                                         event.stopPropagation(); // Prevent row selection
-                                                        // Show alert with task IDs for this team member and day
                                                         var teamMember = params.data['""" + team_member_col + """'];
                                                         var day = '""" + col + """';
                                                         var hours = params.value;
+                                                        var taskDetails = this.getTasksForMemberAndDay(teamMember, day);
                                                         
-                                                        // Get task IDs for this team member and day
-                                                        var taskIds = this.getTaskIdsForMemberAndDay(teamMember, day);
-                                                        alert('Team Member: ' + teamMember + '\\nDate: ' + day + '\\nHours: ' + hours + '\\nTask IDs: ' + taskIds);
+                                                        this.ensureModalStyles();
+                                                        this.openModal(teamMember, day, hours, taskDetails);
                                                     });
                                                 } else {
                                                     this.eGui.style.color = '#999';
@@ -2478,12 +2485,164 @@ def main():
                                                 return false;
                                             }
                                             
-                                            getTaskIdsForMemberAndDay(teamMember, day) {
+                                            getTasksForMemberAndDay(teamMember, day) {
                                                 var taskMapping = """ + task_mapping_json + """;
                                                 if (taskMapping[teamMember] && taskMapping[teamMember][day]) {
-                                                    return taskMapping[teamMember][day].join(', ');
+                                                    return taskMapping[teamMember][day];
                                                 }
-                                                return 'No tasks found';
+                                                return [];
+                                            }
+                                            
+                                            ensureModalStyles() {
+                                                if (document.getElementById('sb-modal-styles')) return;
+                                                var style = document.createElement('style');
+                                                style.id = 'sb-modal-styles';
+                                                style.textContent = `
+                                                    .sb-modal-overlay {
+                                                        position: fixed;
+                                                        top: 0;
+                                                        left: 0;
+                                                        width: 100vw;
+                                                        height: 100vh;
+                                                        background: rgba(0,0,0,0.45);
+                                                        display: none;
+                                                        align-items: center;
+                                                        justify-content: center;
+                                                        z-index: 2147483000;
+                                                    }
+                                                    .sb-modal {
+                                                        background: #ffffff;
+                                                        color: #262730;
+                                                        border-radius: 8px;
+                                                        box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+                                                        width: min(640px, 95vw);
+                                                        max-height: 90vh;
+                                                        display: flex;
+                                                        flex-direction: column;
+                                                        overflow: hidden;
+                                                        border: 1px solid #e5e7eb;
+                                                    }
+                                                    .sb-modal-header {
+                                                        display: flex;
+                                                        align-items: center;
+                                                        justify-content: space-between;
+                                                        padding: 12px 16px;
+                                                        border-bottom: 1px solid #f1f1f1;
+                                                        font-weight: 600;
+                                                    }
+                                                    .sb-modal-content {
+                                                        padding: 16px;
+                                                        overflow: auto;
+                                                        max-height: 75vh;
+                                                    }
+                                                    .sb-modal-close {
+                                                        border: none;
+                                                        background: transparent;
+                                                        font-size: 18px;
+                                                        cursor: pointer;
+                                                        color: #6b7280;
+                                                    }
+                                                    .sb-modal-list { margin: 0; padding-left: 16px; }
+                                                    .sb-badge {
+                                                        display: inline-block;
+                                                        background: #f3f4f6;
+                                                        color: #111827;
+                                                        border-radius: 9999px;
+                                                        padding: 2px 8px;
+                                                        font-size: 12px;
+                                                        margin-left: 6px;
+                                                    }
+                                                `;
+                                                document.head.appendChild(style);
+                                            }
+                                            
+                                            openModal(teamMember, day, hours, taskDetails) {
+                                                let overlay = document.getElementById('sb-modal-overlay');
+                                                if (!overlay) {
+                                                    overlay = document.createElement('div');
+                                                    overlay.id = 'sb-modal-overlay';
+                                                    overlay.className = 'sb-modal-overlay';
+                                                    
+                                                    const modal = document.createElement('div');
+                                                    modal.id = 'sb-modal';
+                                                    modal.className = 'sb-modal';
+                                                    
+                                                    const header = document.createElement('div');
+                                                    header.className = 'sb-modal-header';
+                                                    const title = document.createElement('div');
+                                                    title.textContent = 'Task Details';
+                                                    const closeBtn = document.createElement('button');
+                                                    closeBtn.className = 'sb-modal-close';
+                                                    closeBtn.innerHTML = '&times;';
+                                                    closeBtn.addEventListener('click', () => this.closeModal());
+                                                    header.appendChild(title);
+                                                    header.appendChild(closeBtn);
+                                                    
+                                                    const content = document.createElement('div');
+                                                    content.className = 'sb-modal-content';
+                                                    content.id = 'sb-modal-content';
+                                                    
+                                                    modal.appendChild(header);
+                                                    modal.appendChild(content);
+                                                    overlay.appendChild(modal);
+                                                    
+                                                    overlay.addEventListener('click', (e) => {
+                                                        if (e.target === overlay) this.closeModal();
+                                                    });
+                                                    
+                                                    document.body.appendChild(overlay);
+                                                }
+                                                
+                                                // Update content
+                                                const contentEl = document.getElementById('sb-modal-content');
+                                                if (contentEl) {
+                                                    contentEl.innerHTML = '';
+                                                    const p1 = document.createElement('p');
+                                                    p1.innerHTML = `<strong>Team Member:</strong> ${this.escapeHtml(teamMember)}`;
+                                                    const p2 = document.createElement('p');
+                                                    p2.innerHTML = `<strong>Date:</strong> ${this.escapeHtml(day)} <span class="sb-badge">Total: ${this.escapeHtml(String(hours))} h</span>`;
+                                                    const p3 = document.createElement('p');
+                                                    p3.innerHTML = `<strong>Task-wise hours:</strong>`;
+                                                    const list = document.createElement('ul');
+                                                    list.className = 'sb-modal-list';
+                                                    
+                                                    if (Array.isArray(taskDetails) && taskDetails.length > 0) {
+                                                        taskDetails.forEach((t) => {
+                                                            const li = document.createElement('li');
+                                                            const idText = this.escapeHtml(String(t.id));
+                                                            const hrsText = this.escapeHtml(String(t.hours));
+                                                            li.innerHTML = `<strong>Task ${idText}</strong>: ${hrsText} h`;
+                                                            list.appendChild(li);
+                                                        });
+                                                    } else {
+                                                        const li = document.createElement('li');
+                                                        li.textContent = 'No tasks found';
+                                                        list.appendChild(li);
+                                                    }
+                                                    
+                                                    contentEl.appendChild(p1);
+                                                    contentEl.appendChild(p2);
+                                                    contentEl.appendChild(p3);
+                                                    contentEl.appendChild(list);
+                                                }
+                                                
+                                                overlay.style.display = 'flex';
+                                                document.body.style.overflow = 'hidden';
+                                            }
+                                            
+                                            closeModal() {
+                                                const overlay = document.getElementById('sb-modal-overlay');
+                                                if (overlay) overlay.style.display = 'none';
+                                                document.body.style.overflow = '';
+                                            }
+                                            
+                                            escapeHtml(unsafe) {
+                                                return String(unsafe)
+                                                    .replace(/&/g, '&amp;')
+                                                    .replace(/</g, '&lt;')
+                                                    .replace(/>/g, '&gt;')
+                                                    .replace(/"/g, '&quot;')
+                                                    .replace(/'/g, '&#039;');
                                             }
                                         }
                                         """)
