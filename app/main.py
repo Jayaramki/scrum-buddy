@@ -2315,9 +2315,6 @@ def main():
                                 pivot_df = st.session_state.daily_progress_data['pivot_df']
                                 team_members = st.session_state.daily_progress_data['team_members']
                                 
-                                # Display the spreadsheet
-                                st.subheader("📊 Daily Progress Tracker (Click on hours to view details)")
-                                
                                 # Add Export to Excel functionality
                                 col_export, col_info = st.columns([1, 4])
                                 with col_export:
