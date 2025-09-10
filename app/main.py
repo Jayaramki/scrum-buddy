@@ -2206,15 +2206,6 @@ def main():
                                     )
                                     
                                     if task_updates:
-                                        # Debug: Check for specific task 63091
-                                        task_63091_found = any(task['Task_ID'] == 63091 for task in task_updates)
-                                        if not task_63091_found:
-                                            st.warning(f"⚠️ Debug: Task 63091 not found in task_updates. Checking if it's in work_item_ids...")
-                                            if 63091 in st.session_state.work_item_ids:
-                                                st.warning(f"⚠️ Debug: Task 63091 is in work_item_ids but not in task_updates. This suggests no completed work changes were found.")
-                                            else:
-                                                st.warning(f"⚠️ Debug: Task 63091 is NOT in work_item_ids. This suggests it's not being fetched by the API query.")
-                                        
                                         # Check if we need to include missing tasks with completed work
                                         missing_tasks = []
                                         all_work_item_details = st.session_state.api_instance.get_work_item_details(st.session_state.work_item_ids)
