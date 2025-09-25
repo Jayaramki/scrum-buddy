@@ -1194,6 +1194,223 @@ def create_summary_stats(df):
         'total_remaining': total_remaining
     }
 
+def detect_parent_child_state_warnings(parent_child_data, work_items_data):
+    """
+    Detect parent work items in Proposed/Planned state while child tasks are in more advanced states
+    Returns list of warning objects with details about problematic parent-child combinations
+    """
+    warnings = []
+    
+    if parent_child_data is None or parent_child_data.empty:
+        return warnings
+    
+    # Define state progression (earlier states to later states)
+    state_progression = {
+        'Proposed': 0,
+        'Planned': 1,
+        'Active': 2,
+        'Resolved': 3,
+        'Closed': 4,
+        'Done': 4,
+        'Completed': 4
+    }
+    
+    # Get all child tasks from work_items_data
+    child_tasks = {}
+    if work_items_data:
+        for item in work_items_data:
+            if item.get('fields', {}).get('System.WorkItemType') == 'Task':
+                child_tasks[item['id']] = {
+                    'title': item.get('fields', {}).get('System.Title', 'Unknown'),
+                    'state': item.get('fields', {}).get('System.State', 'Unknown'),
+                    'assigned_to': item.get('fields', {}).get('System.AssignedTo', {}).get('displayName', 'Unassigned')
+                }
+    
+    # Check each parent work item
+    for _, parent_row in parent_child_data.iterrows():
+        parent_id = parent_row['ID']
+        parent_title = parent_row['Title']
+        parent_state = parent_row['State']
+        
+        # Only check parents in Proposed or Planned state
+        if parent_state in ['Proposed', 'Planned']:
+            # Find child tasks for this parent
+            child_tasks_for_parent = []
+            for child_id, child_info in child_tasks.items():
+                # Check if this child belongs to the current parent
+                # This would need to be determined from the parent-child relationships
+                # For now, we'll use a simplified approach
+                if hasattr(st.session_state, 'child_to_parent_mapping'):
+                    if st.session_state.child_to_parent_mapping.get(child_id) == parent_id:
+                        child_tasks_for_parent.append({
+                            'id': child_id,
+                            'title': child_info['title'],
+                            'state': child_info['state'],
+                            'assigned_to': child_info['assigned_to']
+                        })
+            
+            # Check if any child tasks are in more advanced states
+            problematic_children = []
+            for child in child_tasks_for_parent:
+                child_state = child['state']
+                parent_state_level = state_progression.get(parent_state, 0)
+                child_state_level = state_progression.get(child_state, 0)
+                
+                if child_state_level > parent_state_level:
+                    problematic_children.append(child)
+            
+            # If we found problematic children, create a warning
+            if problematic_children:
+                warnings.append({
+                    'parent_id': parent_id,
+                    'parent_title': parent_title,
+                    'parent_state': parent_state,
+                    'problematic_children': problematic_children,
+                    'severity': 'high' if parent_state == 'Proposed' else 'medium'
+                })
+    
+    return warnings
+
+def detect_closed_tasks_with_remaining_work_warnings(work_items_data):
+    """
+    Detect closed tasks that still have remaining work > 0
+    Returns list of warning objects with details about closed tasks with remaining work
+    """
+    warnings = []
+    
+    if not work_items_data:
+        return warnings
+    
+    # Check each work item for closed state with remaining work
+    for item in work_items_data:
+        fields = item.get('fields', {})
+        work_item_id = item.get('id')
+        title = fields.get('System.Title', 'Unknown')
+        state = fields.get('System.State', 'Unknown')
+        work_item_type = fields.get('System.WorkItemType', 'Unknown')
+        assigned_to = fields.get('System.AssignedTo', {}).get('displayName', 'Unassigned')
+        remaining_work = fields.get('Microsoft.VSTS.Scheduling.RemainingWork', 0) or 0
+        
+        # Check if it's a closed task with remaining work
+        if (work_item_type == 'Task' and 
+            state in ['Closed', 'Done', 'Completed'] and 
+            remaining_work > 0):
+            
+            warnings.append({
+                'task_id': work_item_id,
+                'task_title': title,
+                'state': state,
+                'assigned_to': assigned_to,
+                'remaining_work': remaining_work,
+                'severity': 'medium'
+            })
+    
+    return warnings
+
+def display_parent_child_state_warnings(warnings):
+    """Display warnings about parent-child state mismatches"""
+    if not warnings:
+        return
+    
+    st.subheader("⚠️ Parent-Child State Warnings")
+    
+    for warning in warnings:
+        parent_id = warning['parent_id']
+        parent_title = warning['parent_title']
+        parent_state = warning['parent_state']
+        problematic_children = warning['problematic_children']
+        severity = warning['severity']
+        
+        # Choose warning icon and color based on severity
+        if severity == 'high':
+            warning_icon = "🔴"
+            warning_color = "red"
+        else:
+            warning_icon = "🟡"
+            warning_color = "orange"
+        
+        # Display warning for this parent
+        with st.container():
+            st.markdown(f"""
+            <div style="border-left: 4px solid {warning_color}; padding: 10px; margin: 10px 0; background-color: #f8f9fa;">
+                <h4>{warning_icon} Parent Work Item in {parent_state} State</h4>
+                <p><strong>Parent:</strong> <a href="#" onclick="window.open('https://dev.azure.com', '_blank')">#{parent_id}</a> - {parent_title}</p>
+                <p><strong>Issue:</strong> Parent is in <code>{parent_state}</code> state but has child tasks in more advanced states:</p>
+                <ul>
+            """, unsafe_allow_html=True)
+            
+            for child in problematic_children:
+                st.markdown(f"""
+                <li><strong>Task #{child['id']}</strong> - {child['title']} 
+                <span style="color: {warning_color}; font-weight: bold;">({child['state']})</span>
+                <em>Assigned to: {child['assigned_to']}</em></li>
+                """, unsafe_allow_html=True)
+            
+            st.markdown("""
+                </ul>
+                <p><strong>Recommendation:</strong> Consider updating the parent work item state to match the progress of its child tasks.</p>
+            </div>
+            """, unsafe_allow_html=True)
+    
+    # Summary statistics
+    high_severity_count = sum(1 for w in warnings if w['severity'] == 'high')
+    medium_severity_count = sum(1 for w in warnings if w['severity'] == 'medium')
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("🔴 High Severity", high_severity_count)
+    with col2:
+        st.metric("🟡 Medium Severity", medium_severity_count)
+    with col3:
+        st.metric("📊 Total Warnings", len(warnings))
+
+def display_closed_tasks_with_remaining_work_warnings(warnings):
+    """Display warnings about closed tasks with remaining work"""
+    if not warnings:
+        return
+    
+    st.subheader("⚠️ Closed Tasks with Remaining Work")
+    
+    for warning in warnings:
+        task_id = warning['task_id']
+        task_title = warning['task_title']
+        state = warning['state']
+        assigned_to = warning['assigned_to']
+        remaining_work = warning['remaining_work']
+        severity = warning['severity']
+        
+        # Choose warning icon and color based on severity
+        if severity == 'high':
+            warning_icon = "🔴"
+            warning_color = "red"
+        else:
+            warning_icon = "🟡"
+            warning_color = "orange"
+        
+        # Display warning for this task
+        with st.container():
+            st.markdown(f"""
+            <div style="border-left: 4px solid {warning_color}; padding: 10px; margin: 10px 0; background-color: #f8f9fa;">
+                <h4>{warning_icon} Closed Task with Remaining Work</h4>
+                <p><strong>Task:</strong> <a href="#" onclick="window.open('https://dev.azure.com', '_blank')">#{task_id}</a> - {task_title}</p>
+                <p><strong>Issue:</strong> Task is in <code>{state}</code> state but still has <strong>{remaining_work} hours</strong> of remaining work.</p>
+                <p><strong>Assigned to:</strong> {assigned_to}</p>
+                <p><strong>Recommendation:</strong> Either update the remaining work to 0 or change the task state to reflect the actual work status.</p>
+            </div>
+            """, unsafe_allow_html=True)
+    
+    # Summary statistics
+    total_remaining_hours = sum(w['remaining_work'] for w in warnings)
+    medium_severity_count = sum(1 for w in warnings if w['severity'] == 'medium')
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("🟡 Medium Severity", medium_severity_count)
+    with col2:
+        st.metric("⏱️ Total Remaining Hours", f"{total_remaining_hours:.1f}")
+    with col3:
+        st.metric("📊 Total Warnings", len(warnings))
+
 def display_work_items_details_table(df, project_name, api_instance):
     """Display work items details table with filtering options"""
     st.subheader("📋 Work Items Details")
@@ -2001,7 +2218,59 @@ def main():
                             
                             # Display Sprint Metrics (data is now loaded)
                             if st.session_state.sprint_data is not None:
+                                # Calculate and display warning count at the top of Sprint Metrics tab
+                                parent_child_warnings_count = 0
+                                closed_tasks_warnings_count = 0
+                                
+                                if (hasattr(st.session_state, 'parent_child_data') and 
+                                    st.session_state.parent_child_data is not None and 
+                                    not st.session_state.parent_child_data.empty and
+                                    hasattr(st.session_state, 'work_item_details')):
+                                    parent_child_warnings_count = len(detect_parent_child_state_warnings(
+                                        st.session_state.parent_child_data, 
+                                        st.session_state.work_item_details
+                                    ))
+                                
+                                if hasattr(st.session_state, 'work_item_details') and st.session_state.work_item_details:
+                                    closed_tasks_warnings_count = len(detect_closed_tasks_with_remaining_work_warnings(
+                                        st.session_state.work_item_details
+                                    ))
+                                
+                                total_warnings = parent_child_warnings_count + closed_tasks_warnings_count
+                                
+                                # Display warning count prominently at the top
+                                if total_warnings > 0:
+                                    st.markdown(f"""
+                                    <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; border-radius: 5px; padding: 10px; margin-bottom: 20px;">
+                                        <h4 style="margin: 0; color: #856404; display: flex; align-items: center;">
+                                            <span style="font-size: 20px; margin-right: 8px;">⚠️</span>
+                                            {total_warnings} Work Item Warning{'' if total_warnings == 1 else 's'} Detected
+                                        </h4>
+                                        <p style="margin: 5px 0 0 0; color: #856404; font-size: 14px;">
+                                            Please review the warnings below for detailed information.
+                                        </p>
+                                    </div>
+                                    """, unsafe_allow_html=True)
+                                
                                 display_metrics(st.session_state.sprint_data)
+                                
+                                # Parent-Child State Warnings
+                                if (st.session_state.parent_child_data is not None and 
+                                    not st.session_state.parent_child_data.empty and 
+                                    hasattr(st.session_state, 'work_item_details')):
+                                    
+                                    parent_child_warnings = detect_parent_child_state_warnings(
+                                        st.session_state.parent_child_data, 
+                                        st.session_state.work_item_details
+                                    )
+                                    display_parent_child_state_warnings(parent_child_warnings)
+                                
+                                # Closed Tasks with Remaining Work Warnings
+                                if hasattr(st.session_state, 'work_item_details') and st.session_state.work_item_details:
+                                    closed_tasks_warnings = detect_closed_tasks_with_remaining_work_warnings(
+                                        st.session_state.work_item_details
+                                    )
+                                    display_closed_tasks_with_remaining_work_warnings(closed_tasks_warnings)
                                 
                                 # Team Summary Table
                                 st.subheader("👥 Team Summary")
