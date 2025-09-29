@@ -1334,14 +1334,14 @@ def display_parent_child_state_warnings(warnings):
             st.markdown(f"""
             <div style="border-left: 4px solid {warning_color}; padding: 10px; margin: 10px 0; background-color: #f8f9fa;">
                 <h4>{warning_icon} Parent Work Item in {parent_state} State</h4>
-                <p><strong>Parent:</strong> <a href="#" onclick="window.open('https://dev.azure.com', '_blank')">#{parent_id}</a> - {parent_title}</p>
+                <p><strong>Parent:</strong> <a href="{get_config_value('AZURE_DEV_URL')}/{st.session_state.api_instance.organization}/{st.session_state.api_instance.project}/_workitems/edit/{parent_id}" target="_blank">#{parent_id}</a> - {parent_title}</p>
                 <p><strong>Issue:</strong> Parent is in <code>{parent_state}</code> state but has child tasks in more advanced states:</p>
                 <ul>
             """, unsafe_allow_html=True)
             
             for child in problematic_children:
                 st.markdown(f"""
-                <li><strong>Task #{child['id']}</strong> - {child['title']} 
+                <li><strong>Task <a href="{get_config_value('AZURE_DEV_URL')}/{st.session_state.api_instance.organization}/{st.session_state.api_instance.project}/_workitems/edit/{child['id']}" target="_blank">#{child['id']}</a></strong> - {child['title']} 
                 <span style="color: {warning_color}; font-weight: bold;">({child['state']})</span>
                 <em>Assigned to: {child['assigned_to']}</em></li>
                 """, unsafe_allow_html=True)
@@ -1392,7 +1392,7 @@ def display_closed_tasks_with_remaining_work_warnings(warnings):
             st.markdown(f"""
             <div style="border-left: 4px solid {warning_color}; padding: 10px; margin: 10px 0; background-color: #f8f9fa;">
                 <h4>{warning_icon} Closed Task with Remaining Work</h4>
-                <p><strong>Task:</strong> <a href="#" onclick="window.open('https://dev.azure.com', '_blank')">#{task_id}</a> - {task_title}</p>
+                <p><strong>Task:</strong> <a href="{get_config_value('AZURE_DEV_URL')}/{st.session_state.api_instance.organization}/{st.session_state.api_instance.project}/_workitems/edit/{task_id}" target="_blank">#{task_id}</a> - {task_title}</p>
                 <p><strong>Issue:</strong> Task is in <code>{state}</code> state but still has <strong>{remaining_work} hours</strong> of remaining work.</p>
                 <p><strong>Assigned to:</strong> {assigned_to}</p>
                 <p><strong>Recommendation:</strong> Either update the remaining work to 0 or change the task state to reflect the actual work status.</p>
