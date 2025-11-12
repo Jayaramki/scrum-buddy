@@ -1882,6 +1882,8 @@ def main():
     if not st.session_state.available_projects:
         st.warning("📋 No projects available. Please check your Azure DevOps connection and try refreshing.")
     
+    previous_project = st.session_state.get('selected_project')
+    
     # Project selection without refresh button
     selected_project = st.selectbox(
         "Select Project",
@@ -1889,7 +1891,9 @@ def main():
         key="project_select"
     )
     
-    if selected_project != st.session_state.selected_project:
+    project_changed = selected_project != previous_project
+    
+    if project_changed:
         st.session_state.selected_project = selected_project
         st.session_state.selected_team = None
         st.session_state.selected_iter_name = None
@@ -1917,16 +1921,20 @@ def main():
         for flag in cache_flags:
             if flag in st.session_state:
                 del st.session_state[flag]
+        
+        # Reset dependent cached data to ensure fresh loads
+        st.session_state.api_instance = None
+        st.session_state.available_teams = []
+        st.session_state.last_selected_project = None
+        if 'available_iterations' in st.session_state:
+            del st.session_state.available_iterations
     
-    if selected_project:
-        # Initialize API for selected project
-        if st.session_state.api_instance is None or st.session_state.selected_project != selected_project:
-            st.session_state.api_instance = SprintMonitoringAPI(selected_project)
-        api = st.session_state.api_instance
+    valid_project_selected = selected_project and selected_project != "-- Select --"
     
-    if selected_project and selected_project != "-- Select --":
+    if valid_project_selected:
         # Initialize API for selected project
-        if st.session_state.api_instance is None or st.session_state.selected_project != selected_project:
+        current_project = getattr(st.session_state.api_instance, 'project', None) if st.session_state.api_instance else None
+        if st.session_state.api_instance is None or current_project != selected_project:
             st.session_state.api_instance = SprintMonitoringAPI(selected_project)
         api = st.session_state.api_instance
         
