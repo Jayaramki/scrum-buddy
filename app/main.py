@@ -593,7 +593,11 @@ class SprintMonitoringAPI:
             st.session_state.data_cache.set(cache_type, cache_params, work_item_ids)
             return work_item_ids
         else:
-            st.error(f"Error getting work items: {response.status_code}")
+            try:
+                err_detail = response.json().get('message', response.text[:200])
+            except Exception:
+                err_detail = response.text[:200]
+            st.error(f"Error getting work items ({response.status_code}): {err_detail}")
             return []
 
     def get_all_work_items(self, iteration_path):
@@ -2191,28 +2195,42 @@ def main():
                                 st.rerun()
                     
                     # Get work items for selected sprint
+                    # selected_iter_path may be None if session was restored from URL params
+                    # before iterations were loaded — resolve it now if needed
+                    if not st.session_state.selected_iter_path and st.session_state.selected_iter_name:
+                        for _iter in st.session_state.get('available_iterations', []):
+                            if _iter['name'] == st.session_state.selected_iter_name:
+                                st.session_state.selected_iter_path = _iter['path']
+                                break
+
                     if not st.session_state.work_item_ids:
-                        with st.spinner(f"🔄 Fetching tasks for {selected_iter_name} in team '{selected_team}'..."):
-                            work_item_ids = api.get_work_items(st.session_state.selected_iter_path)
-                            if work_item_ids:
-                                st.session_state.work_item_ids = work_item_ids
-                                st.success(f"✅ Found {len(work_item_ids)} tasks in {selected_iter_name} (Team: {selected_team})")
-                            else:
-                                st.error("❌ Failed to fetch tasks")
+                        if not st.session_state.selected_iter_path:
+                            st.warning("⚠️ Could not resolve iteration path — please re-select the sprint.")
+                        else:
+                            with st.spinner(f"🔄 Fetching tasks for {selected_iter_name} in team '{selected_team}'..."):
+                                work_item_ids = api.get_work_items(st.session_state.selected_iter_path)
+                                if work_item_ids:
+                                    st.session_state.work_item_ids = work_item_ids
+                                    st.success(f"✅ Found {len(work_item_ids)} tasks in {selected_iter_name} (Team: {selected_team})")
+                                else:
+                                    st.error("❌ Failed to fetch tasks")
                     
                     # Get all work items for Sprint Metrics tab
                     if not st.session_state.all_work_item_ids:
-                        with st.spinner(f"🔄 Fetching all work items for {selected_iter_name} in team '{selected_team}'..."):
-                            try:
-                                all_work_item_ids = api.get_all_work_items(st.session_state.selected_iter_path)
-                                if all_work_item_ids:
-                                    st.session_state.all_work_item_ids = all_work_item_ids
-                                    st.success(f"✅ Found {len(all_work_item_ids)} total work items in {selected_iter_name} (Team: {selected_team})")
-                                else:
-                                    st.error("❌ Failed to fetch all work items")
-                            except AttributeError:
-                                # Fallback: use the simpler method
-                                st.warning("⚠️ Using fallback method for all work items")
+                        if not st.session_state.selected_iter_path:
+                            st.warning("⚠️ Could not resolve iteration path — please re-select the sprint.")
+                        else:
+                            with st.spinner(f"🔄 Fetching all work items for {selected_iter_name} in team '{selected_team}'..."):
+                                try:
+                                    all_work_item_ids = api.get_all_work_items(st.session_state.selected_iter_path)
+                                    if all_work_item_ids:
+                                        st.session_state.all_work_item_ids = all_work_item_ids
+                                        st.success(f"✅ Found {len(all_work_item_ids)} total work items in {selected_iter_name} (Team: {selected_team})")
+                                    else:
+                                        st.error("❌ Failed to fetch all work items")
+                                except AttributeError:
+                                    # Fallback: use the simpler method
+                                    st.warning("⚠️ Using fallback method for all work items")
                                 all_work_item_ids = api.get_all_work_items_simple(st.session_state.selected_iter_path)
                                 if all_work_item_ids:
                                     st.session_state.all_work_item_ids = all_work_item_ids
