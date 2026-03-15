@@ -1631,6 +1631,125 @@ def display_metrics(df):
     
 
 
+def display_burndown_chart(start_date, end_date, daily_progress_data, total_estimate_hours):
+    """Render an ideal vs actual burndown chart for the sprint."""
+    st.subheader("📉 Sprint Burndown Chart")
+
+    today = datetime.now().date()
+    sprint_days = (end_date - start_date).days + 1
+    all_dates = [start_date + timedelta(days=x) for x in range(sprint_days)]
+
+    # Ideal burndown: linear from total_estimate_hours → 0
+    ideal = [total_estimate_hours * (1 - i / (sprint_days - 1)) if sprint_days > 1 else 0
+             for i in range(sprint_days)]
+
+    # Build actual remaining from daily progress
+    # daily_progress_data is a list of dicts with keys: Date, Hours_Updated, Team_Member, ...
+    if daily_progress_data:
+        dp_df = pd.DataFrame(daily_progress_data)
+        dp_df['Date'] = pd.to_datetime(dp_df['Date']).dt.date
+        daily_completed = dp_df.groupby('Date')['Hours_Updated'].sum()
+    else:
+        daily_completed = pd.Series(dtype=float)
+
+    actual_dates = []
+    actual_remaining = []
+    running_remaining = total_estimate_hours
+    for d in all_dates:
+        if d > today:
+            break
+        completed_on_day = daily_completed.get(d, 0)
+        running_remaining = max(running_remaining - completed_on_day, 0)
+        actual_dates.append(d)
+        actual_remaining.append(running_remaining)
+
+    # Build Plotly figure
+    import plotly.graph_objects as go
+    fig = go.Figure()
+
+    # Ideal line
+    fig.add_trace(go.Scatter(
+        x=all_dates,
+        y=ideal,
+        mode='lines',
+        name='Ideal Burndown',
+        line=dict(color='#adb5bd', width=2, dash='dash'),
+    ))
+
+    # Actual line (only up to today)
+    if actual_dates:
+        fig.add_trace(go.Scatter(
+            x=actual_dates,
+            y=actual_remaining,
+            mode='lines+markers',
+            name='Actual Remaining',
+            line=dict(color='#4facfe', width=3),
+            marker=dict(size=6),
+        ))
+
+    # Today marker
+    if start_date <= today <= end_date:
+        fig.add_vline(
+            x=str(today), line_width=1, line_dash='dot', line_color='#f5576c',
+            annotation_text='Today', annotation_position='top right'
+        )
+
+    fig.update_layout(
+        xaxis_title='Date',
+        yaxis_title='Remaining Work (hrs)',
+        hovermode='x unified',
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+        margin=dict(l=0, r=0, t=30, b=0),
+        height=350,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def display_workload_balance_chart(df):
+    """Render a horizontal bar chart of remaining vs completed hours per team member."""
+    st.subheader("⚖️ Team Workload Balance")
+
+    tasks_df = df[df['WorkItemType'] == 'Task'].copy()
+    assigned = tasks_df[tasks_df['AssignedTo'] != 'Unassigned']
+
+    if assigned.empty:
+        st.info("No assigned tasks found for workload chart.")
+        return
+
+    summary = (
+        assigned.groupby('AssignedTo')
+        .agg(Completed=('CompletedWork', 'sum'), Remaining=('RemainingWork', 'sum'))
+        .reset_index()
+        .sort_values('Remaining', ascending=True)
+    )
+
+    import plotly.graph_objects as go
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        y=summary['AssignedTo'],
+        x=summary['Completed'],
+        name='Completed (hrs)',
+        orientation='h',
+        marker_color='#43e97b',
+    ))
+    fig.add_trace(go.Bar(
+        y=summary['AssignedTo'],
+        x=summary['Remaining'],
+        name='Remaining (hrs)',
+        orientation='h',
+        marker_color='#f5576c',
+    ))
+    fig.update_layout(
+        barmode='stack',
+        xaxis_title='Hours',
+        yaxis_title='',
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+        margin=dict(l=0, r=0, t=30, b=0),
+        height=max(250, len(summary) * 38),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
 def make_work_item_url(id, org, base_url, project):
     """Generate work item URL for link columns"""
     return f"{base_url}/{org}/{project}/_workitems/edit/{id}"
@@ -1757,6 +1876,40 @@ def show_task_details(team_member, date, hours):
         with st.expander(f"📋 Task Details for {team_member} on {date.strftime('%B %d, %Y')} (Total: {hours}h)", expanded=True):
             show_task_details_dialog(team_member, date, hours)
 
+def _show_sprint_countdown(start_date, end_date, sprint_name):
+    """Show a sprint countdown widget in the sidebar."""
+    today = datetime.now().date()
+    total_days = (end_date - start_date).days + 1
+    elapsed_days = (today - start_date).days + 1
+    remaining_days = (end_date - today).days
+
+    if today < start_date:
+        st.sidebar.info(f"🗓️ **{sprint_name}** starts in {(start_date - today).days} day(s)")
+        return
+    if today > end_date:
+        st.sidebar.warning(f"🏁 **{sprint_name}** ended {(today - end_date).days} day(s) ago")
+        return
+
+    pct_elapsed = elapsed_days / total_days
+    if pct_elapsed < 0.6:
+        color, icon = "#43e97b", "🟢"
+    elif pct_elapsed < 0.85:
+        color, icon = "#fee140", "🟡"
+    else:
+        color, icon = "#f5576c", "🔴"
+
+    st.sidebar.markdown(f"""
+    <div style="background:#1e1e2e;border-radius:10px;padding:12px 16px;margin-bottom:8px;">
+        <p style="margin:0;font-size:0.8rem;color:#adb5bd;">{icon} Sprint Countdown</p>
+        <h2 style="margin:4px 0;color:{color};font-size:2rem;font-weight:bold;">{remaining_days}d left</h2>
+        <p style="margin:0;font-size:0.75rem;color:#adb5bd;">Day {elapsed_days} of {total_days} &nbsp;·&nbsp; {sprint_name}</p>
+        <div style="background:#2d2d3e;border-radius:4px;height:6px;margin-top:8px;">
+            <div style="background:{color};width:{min(pct_elapsed*100,100):.1f}%;height:6px;border-radius:4px;"></div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
 def _init_session_state():
     """Initialize all session-state keys with their defaults in one place."""
     defaults = {
@@ -1805,6 +1958,19 @@ def main():
     # Initialize all session state in one call
     _init_session_state()
 
+    # -----------------------------------------------------------------------
+    # URL Persistence: restore project/team/sprint from query params on load
+    # -----------------------------------------------------------------------
+    qp = st.query_params
+    if 'url_params_restored' not in st.session_state:
+        st.session_state.url_params_restored = True
+        if 'project' in qp and st.session_state.selected_project is None:
+            st.session_state.selected_project = qp['project']
+        if 'team' in qp and st.session_state.selected_team is None:
+            st.session_state.selected_team = qp['team']
+        if 'sprint' in qp and st.session_state.selected_iter_name is None:
+            st.session_state.selected_iter_name = qp['sprint']
+
     st.title("📊 Sprint Monitoring Dashboard")
     
     # Project Selection
@@ -1836,11 +2002,16 @@ def main():
         st.warning("📋 No projects available. Please check your Azure DevOps connection and try refreshing.")
     
     previous_project = st.session_state.get('selected_project')
+
+    # Pre-select from URL-restored session state
+    _pre_project = st.session_state.get('selected_project')
+    _project_idx = project_options.index(_pre_project) if _pre_project in project_options else 0
     
     # Project selection without refresh button
     selected_project = st.selectbox(
         "Select Project",
         options=project_options,
+        index=_project_idx,
         key="project_select"
     )
     
@@ -1869,6 +2040,10 @@ def main():
         st.session_state.available_teams = []
         st.session_state.last_selected_project = None
         st.session_state.pop('available_iterations', None)
+        # Update URL params
+        st.query_params['project'] = selected_project
+        st.query_params.pop('team', None)
+        st.query_params.pop('sprint', None)
     
     valid_project_selected = selected_project and selected_project != "-- Select --"
     
@@ -1894,9 +2069,14 @@ def main():
         
         team_names = ["-- Select --"] + [team['name'] for team in teams] if teams else ["-- Select --"]
         
+        # Pre-select team from URL-restored session state
+        _pre_team = st.session_state.get('selected_team')
+        _team_idx = team_names.index(_pre_team) if _pre_team in team_names else 0
+
         selected_team = st.selectbox(
             "Select Team",
             options=team_names,
+            index=_team_idx,
             key="team_select"
         )
         
@@ -1916,6 +2096,9 @@ def main():
             st.session_state.daily_progress_data_loaded = False
             # Clear available iterations when team changes
             st.session_state.pop('available_iterations', None)
+            # Update URL params
+            st.query_params['team'] = selected_team
+            st.query_params.pop('sprint', None)
         
         if selected_team and selected_team != "-- Select --":
             # Load iterations automatically when team is selected
@@ -1932,9 +2115,15 @@ def main():
             # Sprint Selection (only show if iterations are available)
             if st.session_state.available_iterations:
                 iteration_names = ["-- Select --"] + [iter['name'] for iter in st.session_state.available_iterations]
+
+                # Pre-select sprint from URL-restored session state
+                _pre_sprint = st.session_state.get('selected_iter_name')
+                _sprint_idx = iteration_names.index(_pre_sprint) if _pre_sprint in iteration_names else 0
+
                 selected_iter_name = st.selectbox(
                     "Select Sprint",
                     options=iteration_names,
+                    index=_sprint_idx,
                     key="sprint_select"
                 )
                 
@@ -1955,10 +2144,18 @@ def main():
                     st.session_state.sprint_data_loaded = False
                     st.session_state.work_items_data_loaded = False
                     st.session_state.daily_progress_data_loaded = False
+                    # Update URL params
+                    if selected_iter_name and selected_iter_name != "-- Select --":
+                        st.query_params['sprint'] = selected_iter_name
+                    else:
+                        st.query_params.pop('sprint', None)
                 
                 if selected_iter_name and selected_iter_name != "-- Select --":
                     # Get sprint dates for display
                     start_date, end_date = st.session_state.api_instance.get_sprint_details(selected_team, selected_iter_name)
+
+                    # Sprint countdown in sidebar
+                    _show_sprint_countdown(start_date, end_date, selected_iter_name)
                     
                     # Display selection info with global refresh button
                     col1, col2 = st.columns([4, 1])
@@ -2187,6 +2384,24 @@ def main():
                                     """, unsafe_allow_html=True)
                                 
                                 display_metrics(st.session_state.sprint_data)
+
+                                # Workload Balance Chart
+                                display_workload_balance_chart(st.session_state.sprint_data)
+
+                                # Burndown Chart (uses daily progress data if already loaded, else shows placeholder)
+                                tasks_df_for_burn = st.session_state.sprint_data[
+                                    st.session_state.sprint_data['WorkItemType'] == 'Task'
+                                ]
+                                total_est_for_burn = (
+                                    tasks_df_for_burn['RemainingWork'].sum() +
+                                    tasks_df_for_burn['CompletedWork'].sum()
+                                )
+                                daily_prog = (
+                                    st.session_state.daily_progress_data
+                                    if st.session_state.daily_progress_data_loaded
+                                    else None
+                                )
+                                display_burndown_chart(start_date, end_date, daily_prog, total_est_for_burn)
                                 
                                 # Parent-Child State Warnings
                                 if (st.session_state.parent_child_data is not None and 
