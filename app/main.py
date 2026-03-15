@@ -1643,10 +1643,16 @@ def display_burndown_chart(start_date, end_date, daily_progress_data, total_esti
     ideal = [total_estimate_hours * (1 - i / (sprint_days - 1)) if sprint_days > 1 else 0
              for i in range(sprint_days)]
 
-    # Build actual remaining from daily progress
-    # daily_progress_data is a list of dicts with keys: Date, Hours_Updated, Team_Member, ...
-    if daily_progress_data:
-        dp_df = pd.DataFrame(daily_progress_data)
+    # daily_progress_data is stored as a dict {'task_updates': [...], 'pivot_df': ..., ...}
+    # Extract the raw task_updates list for aggregation
+    task_updates = None
+    if isinstance(daily_progress_data, dict):
+        task_updates = daily_progress_data.get('task_updates')
+    elif isinstance(daily_progress_data, list):
+        task_updates = daily_progress_data
+
+    if task_updates:
+        dp_df = pd.DataFrame(task_updates)
         dp_df['Date'] = pd.to_datetime(dp_df['Date']).dt.date
         daily_completed = dp_df.groupby('Date')['Hours_Updated'].sum()
     else:
@@ -2388,7 +2394,7 @@ def main():
                                 # Workload Balance Chart
                                 display_workload_balance_chart(st.session_state.sprint_data)
 
-                                # Burndown Chart (uses daily progress data if already loaded, else shows placeholder)
+                                # Burndown Chart (uses daily progress data if already loaded)
                                 tasks_df_for_burn = st.session_state.sprint_data[
                                     st.session_state.sprint_data['WorkItemType'] == 'Task'
                                 ]
@@ -2396,12 +2402,14 @@ def main():
                                     tasks_df_for_burn['RemainingWork'].sum() +
                                     tasks_df_for_burn['CompletedWork'].sum()
                                 )
-                                daily_prog = (
-                                    st.session_state.daily_progress_data
-                                    if st.session_state.daily_progress_data_loaded
-                                    else None
+                                # Pass the full daily_progress_data dict (or None); the function extracts task_updates internally
+                                display_burndown_chart(
+                                    start_date, end_date,
+                                    st.session_state.daily_progress_data,
+                                    total_est_for_burn
                                 )
-                                display_burndown_chart(start_date, end_date, daily_prog, total_est_for_burn)
+                                if not st.session_state.daily_progress_data_loaded:
+                                    st.caption("💡 Load the **Daily Progress Tracking** tab to populate the actual burndown line.")
                                 
                                 # Parent-Child State Warnings
                                 if (st.session_state.parent_child_data is not None and 
