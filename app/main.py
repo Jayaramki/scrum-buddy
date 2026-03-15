@@ -13,6 +13,7 @@ from functools import wraps
 import pickle
 import gzip
 import hashlib
+import concurrent.futures
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
 import urllib3
 import bcrypt
@@ -22,6 +23,24 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Load environment variables
 load_dotenv()
+
+# ---------------------------------------------------------------------------
+# Application-wide constants — change here, not scattered throughout the code
+# ---------------------------------------------------------------------------
+WORK_ITEM_BATCH_SIZE = 200       # Max IDs per Azure DevOps batch request
+PROGRESS_CHUNK_SIZE = 50         # Work items per chunk in ProgressiveLoader
+RATE_LIMIT_RPS = 8               # Max API requests per second (Azure DevOps limit)
+MAX_CACHE_SIZE_MB = 50           # Maximum in-memory cache size
+CACHE_EVICT_THRESHOLD = 0.8      # Evict down to this fraction of max cache size
+HISTORY_FETCH_WORKERS = 5        # Parallel workers for work item history fetching
+CACHE_FLAG_KEYS = [              # Session-state flags that track "cache hit shown once"
+    'work_item_details_cache_shown',
+    'work_item_ids_cache_shown',
+    'all_work_item_ids_cache_shown',
+    'child_task_details_cache_shown',
+    'work_item_history_cache_shown',
+    'work_item_history_sprint_cache_shown',
+]
 
 # Load secrets for Streamlit Cloud compatibility
 def get_config_value(key, default=None):
@@ -50,7 +69,7 @@ import base64
 
 class ProgressiveLoader:
     """Progressive loader for better user experience during data loading"""
-    def __init__(self, chunk_size=50):
+    def __init__(self, chunk_size=PROGRESS_CHUNK_SIZE):
         self.chunk_size = chunk_size
     
     def load_work_items_progressively(self, api_instance, work_item_ids, progress_callback=None, status_callback=None):
@@ -67,21 +86,16 @@ class ProgressiveLoader:
         for i in range(0, total_items, self.chunk_size):
             chunk_ids = work_item_ids[i:i+self.chunk_size]
             
-            # Update status
             if status_callback:
                 status_callback(f"Loading chunk {i//self.chunk_size + 1}/{(total_items + self.chunk_size - 1)//self.chunk_size} ({len(chunk_ids)} items)...")
             
-            # Load chunk
             chunk_details = api_instance.get_work_item_details(chunk_ids)
             all_details.extend(chunk_details)
             
-            # Update progress
             progress = min((i + self.chunk_size) / total_items, 1.0)
             if progress_callback:
                 progress_callback(progress)
-            
-            # Small delay to prevent overwhelming the API and show progress
-            time.sleep(0.1)
+            # RateLimiter inside get_work_item_details already handles throttling — no sleep needed
         
         if status_callback:
             status_callback(f"✅ Successfully loaded {len(all_details)} work items")
@@ -89,183 +103,170 @@ class ProgressiveLoader:
         return all_details
     
     def load_work_item_history_progressively(self, api_instance, work_item_ids, start_date, end_date, progress_callback=None, status_callback=None):
-        """Load work item history progressively with detailed progress"""
+        """Load work item history in parallel using a thread pool for each work item."""
         if not work_item_ids:
             return []
         
         if status_callback:
             status_callback("🔄 Starting work item history analysis...")
         
-        # First, get work item details in batches
+        # --- Phase 1: Batch-fetch work item details ---
         work_item_details = {}
-        batch_size = 200
-        total_batches = (len(work_item_ids) + batch_size - 1) // batch_size
+        total_batches = (len(work_item_ids) + WORK_ITEM_BATCH_SIZE - 1) // WORK_ITEM_BATCH_SIZE
         
-        for i in range(0, len(work_item_ids), batch_size):
+        for i in range(0, len(work_item_ids), WORK_ITEM_BATCH_SIZE):
             try:
-                batch_num = i // batch_size + 1
+                batch_num = i // WORK_ITEM_BATCH_SIZE + 1
                 if status_callback:
                     status_callback(f"📋 Loading work item details (batch {batch_num}/{total_batches})...")
                 
-                batch_ids = work_item_ids[i:i+batch_size]
+                batch_ids = work_item_ids[i:i+WORK_ITEM_BATCH_SIZE]
                 ids_string = ','.join(map(str, batch_ids))
                 
                 work_items_url = f"{api_instance.base_url}/_apis/wit/workItems?ids={ids_string}&$expand=all&api-version=7.1"
                 response = api_instance.make_request(work_items_url)
                 
                 if response.status_code == 200:
-                    work_items_data = response.json()
-                    
-                    for work_item in work_items_data.get('value', []):
-                        work_item_id = work_item.get('id')
+                    for work_item in response.json().get('value', []):
+                        wid = work_item.get('id')
                         fields = work_item.get('fields', {})
-                        work_item_details[work_item_id] = {
+                        work_item_details[wid] = {
                             'title': fields.get('System.Title', 'Unknown Task'),
                             'state': fields.get('System.State', 'Unknown'),
                             'assigned_to': fields.get('System.AssignedTo', {}).get('displayName', 'Unassigned')
                         }
                 
-                # Update progress for details loading
-                progress = min((i + batch_size) / len(work_item_ids), 1.0) * 0.3  # 30% of total progress
+                progress = min((i + WORK_ITEM_BATCH_SIZE) / len(work_item_ids), 1.0) * 0.3
                 if progress_callback:
                     progress_callback(progress)
                     
             except Exception as e:
                 if status_callback:
-                    status_callback(f"⚠️ Error in batch {batch_num}: {str(e)}")
+                    status_callback(f"⚠️ Error in batch {i // WORK_ITEM_BATCH_SIZE + 1}: {str(e)}")
                 continue
         
         if status_callback:
-            status_callback(f"📊 Analyzing history for {len(work_item_details)} work items...")
+            status_callback(f"📊 Fetching history for {len(work_item_details)} work items (parallel)...")
         
-        # Now get the actual work item history for each work item
-        task_updates = []
-        total_work_items = len(work_item_details)
-        
-        # Reset progress to 0 before starting history processing to show actual progress from 0%
         if progress_callback:
             progress_callback(0.0)
         
-        for idx, (work_item_id, work_item_info) in enumerate(work_item_details.items()):
+        # Pre-compute sprint date range once (not inside each work item loop)
+        sprint_dates = [
+            start_date + timedelta(days=x)
+            for x in range((end_date - start_date).days + 1)
+        ]
+        
+        # --- Phase 2: Fetch history in parallel ---
+        task_updates = []
+        total_work_items = len(work_item_details)
+        completed_count = 0
+        lock = threading.Lock()
+        
+        def fetch_history_for_item(work_item_id, work_item_info):
+            """Fetch and parse history for a single work item."""
+            history_url = f"{api_instance.base_url}/_apis/wit/workItems/{work_item_id}/updates?api-version=7.1"
             try:
-                if status_callback:  # Update status for every item
-                    status_callback(f"📅 Processing history for work item {idx + 1}/{total_work_items}...")
-                
-                # Get work item history
-                history_url = f"{api_instance.base_url}/_apis/wit/workItems/{work_item_id}/updates?api-version=7.1"
+                api_instance.rate_limiter.wait_if_needed()
                 response = api_instance.make_request(history_url)
-
-                if response.status_code == 200:
-                    history_data = response.json()
+                if response.status_code != 200:
+                    return []
+                
+                completed_work_history = []
+                for update in response.json().get('value', []):
+                    fields = update.get('fields', {})
+                    state_change_field = fields.get('System.ChangedDate', {})
+                    update_date_str = (
+                        state_change_field.get('newValue', '') if state_change_field
+                        else update.get('revisedDate', '')
+                    )
+                    if not update_date_str:
+                        continue
                     
-                    # Track completed work progression
-                    completed_work_history = []
-                    
-                    for update in history_data.get('value', []):
-                        fields = update.get('fields', {})
-                        state_change_field = fields.get('System.ChangedDate', {})
-                        update_date = state_change_field.get('newValue', '') if state_change_field else update.get('revisedDate', '')
-                        if update_date:
-                            update_datetime = datetime.fromisoformat(update_date.replace('Z', '+00:00'))
-                            update_date_only = update_datetime.date()
-                            
-                            fields = update.get('fields', {})
-                            completed_work_field = fields.get('Microsoft.VSTS.Scheduling.CompletedWork', {})
-                            
-                            if completed_work_field:
-                                old_value = completed_work_field.get('oldValue', 0) or 0
-                                new_value = completed_work_field.get('newValue', 0) or 0
-                                
-                                if new_value != old_value:  # Only track actual changes
-                                    completed_work_history.append({
-                                        'date': update_date_only,
-                                        'datetime': update_datetime,  # Keep full datetime for sorting
-                                        'old_value': old_value,
-                                        'new_value': new_value,
-                                        'revised_by': update.get('revisedBy', {}).get('displayName', 'Unknown'),
-                                        'update_time': update_datetime.strftime('%H:%M')
-                                    })
-                    
-                    # Sort history by datetime to ensure chronological order
-                    completed_work_history.sort(key=lambda x: x['datetime'])
-                    
-                    # Process all dates in the sprint period
-                    for current_date in [start_date + timedelta(days=x) for x in range((end_date - start_date).days + 1)]:
-                        # Find all revisions with completed_work changes for this specific date
-                        day_revisions = [item for item in completed_work_history if item['date'] == current_date]
-                        
-                        # If no revisions with completed_work changes for this day, skip it
-                        if not day_revisions:
-                            continue
-                        
-                        # Get the first and last revisions for this day
-                        first_revision = day_revisions[0]  # First revision of the day
-                        last_revision = day_revisions[-1]  # Last revision of the day
-                        
-                        # Determine previous_completed from first revision
-                        if first_revision['old_value'] is not None and first_revision['old_value'] > 0:
-                            # First revision has old_value, so this is yesterday's final value
-                            previous_completed = first_revision['old_value']
-                        else:
-                            # First revision has no old_value, so this is the first entry for this task
-                            previous_completed = 0
-                        
-                        # Get final value from last revision
-                        target_completed = last_revision['new_value']
-                        target_update_time = last_revision['update_time']
-                        
-                        # If last revision's new_value is 0, skip this day
-                        if target_completed == 0:
-                            continue
-                        
-                        # Calculate hours logged on the current date
-                        hours_logged_on_date = target_completed - previous_completed
-                        
-                        # Only add if hours were actually logged on this date
-                        if hours_logged_on_date > 0:
-                            task_updates.append({
-                                'Task_ID': work_item_id,
-                                'Task_Title': work_item_info['title'],
-                                'Team_Member': work_item_info['assigned_to'],
-                                'Date': current_date,
-                                'Hours_Updated': hours_logged_on_date,
-                                'Old_Completed': previous_completed,
-                                'New_Completed': target_completed,
-                                'Update_Time': target_update_time,
-                                'Task_State': work_item_info['state']
+                    update_datetime = datetime.fromisoformat(update_date_str.replace('Z', '+00:00'))
+                    completed_work_field = fields.get('Microsoft.VSTS.Scheduling.CompletedWork', {})
+                    if completed_work_field:
+                        old_val = completed_work_field.get('oldValue', 0) or 0
+                        new_val = completed_work_field.get('newValue', 0) or 0
+                        if new_val != old_val:
+                            completed_work_history.append({
+                                'date': update_datetime.date(),
+                                'datetime': update_datetime,
+                                'old_value': old_val,
+                                'new_value': new_val,
+                                'revised_by': update.get('revisedBy', {}).get('displayName', 'Unknown'),
+                                'update_time': update_datetime.strftime('%H:%M')
                             })
                 
-                # Update progress for history processing (now 0% to 100% for better UX)
-                # Show actual progress from 0% to 100% during history processing
-                progress = (idx + 1) / total_work_items
-                if progress_callback:
-                    progress_callback(progress)
+                completed_work_history.sort(key=lambda x: x['datetime'])
                 
-                # Small delay to prevent overwhelming the API
-                time.sleep(0.05)
+                # Group by date using pre-computed sprint_dates
+                item_updates = []
+                history_by_date = {}
+                for h in completed_work_history:
+                    history_by_date.setdefault(h['date'], []).append(h)
+                
+                for current_date in sprint_dates:
+                    day_revisions = history_by_date.get(current_date)
+                    if not day_revisions:
+                        continue
+                    
+                    first_revision = day_revisions[0]
+                    last_revision = day_revisions[-1]
+                    previous_completed = first_revision['old_value'] if first_revision['old_value'] and first_revision['old_value'] > 0 else 0
+                    target_completed = last_revision['new_value']
+                    
+                    if target_completed == 0:
+                        continue
+                    
+                    hours_logged = target_completed - previous_completed
+                    if hours_logged > 0:
+                        item_updates.append({
+                            'Task_ID': work_item_id,
+                            'Task_Title': work_item_info['title'],
+                            'Team_Member': work_item_info['assigned_to'],
+                            'Date': current_date,
+                            'Hours_Updated': hours_logged,
+                            'Old_Completed': previous_completed,
+                            'New_Completed': target_completed,
+                            'Update_Time': last_revision['update_time'],
+                            'Task_State': work_item_info['state']
+                        })
+                return item_updates
                 
             except Exception as e:
                 if status_callback:
-                    status_callback(f"⚠️ Error processing work item {work_item_id}: {str(e)}")
-                continue
+                    with lock:
+                        status_callback(f"⚠️ Error processing work item {work_item_id}: {str(e)}")
+                return []
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=HISTORY_FETCH_WORKERS) as executor:
+            future_to_id = {
+                executor.submit(fetch_history_for_item, wid, info): wid
+                for wid, info in work_item_details.items()
+            }
+            for future in concurrent.futures.as_completed(future_to_id):
+                result = future.result()
+                with lock:
+                    task_updates.extend(result)
+                    completed_count += 1
+                    if progress_callback:
+                        progress_callback(completed_count / total_work_items)
+                    if status_callback:
+                        status_callback(f"📅 Processed {completed_count}/{total_work_items} work items...")
         
         if status_callback:
             status_callback(f"✅ Completed! Found {len(task_updates)} work updates")
         
-        # Debug: Show which work items were processed
-        if task_updates:
-            debug_info = f"📊 Debug: Processed {len(work_item_details)} work items, found {len(task_updates)} updates"
-            if status_callback:
-                status_callback(debug_info)
-        
         return task_updates
 
 class DataCache:
-    """Data cache with compression for efficient memory usage"""
-    def __init__(self, max_cache_size_mb=50):
-        self.max_cache_size = max_cache_size_mb * 1024 * 1024  # Convert to bytes
+    """Data cache with gzip+pickle compression and O(1) size tracking."""
+    def __init__(self, max_cache_size_mb=MAX_CACHE_SIZE_MB):
+        self.max_cache_size = max_cache_size_mb * 1024 * 1024
         self.cache = {}
         self.cache_metadata = {}
+        self._current_size = 0  # Maintained as a running counter — no O(n) scan needed
     
     def _generate_cache_key(self, data_type, params):
         """Generate unique cache key"""
@@ -292,52 +293,47 @@ class DataCache:
             return None
     
     def _get_cache_size(self):
-        """Calculate total cache size"""
-        total_size = 0
-        for key, data in self.cache.items():
-            total_size += len(data)
-        return total_size
+        """Return current total cache size using maintained counter (O(1))."""
+        return self._current_size
     
     def _cleanup_cache(self):
-        """Remove old entries if cache is too large"""
-        if self._get_cache_size() > self.max_cache_size:
-            # Remove oldest entries
-            sorted_entries = sorted(
-                self.cache_metadata.items(), 
-                key=lambda x: x[1]['timestamp']
-            )
-            
-            for key, _ in sorted_entries:
-                if self._get_cache_size() <= self.max_cache_size * 0.8:  # Keep 80%
-                    break
-                del self.cache[key]
-                del self.cache_metadata[key]
+        """Evict oldest entries until cache is at or below the eviction threshold."""
+        if self._current_size <= self.max_cache_size:
+            return
+        target_size = self.max_cache_size * CACHE_EVICT_THRESHOLD
+        sorted_entries = sorted(self.cache_metadata.items(), key=lambda x: x[1]['timestamp'])
+        for key, _ in sorted_entries:
+            if self._current_size <= target_size:
+                break
+            entry_size = len(self.cache[key])
+            del self.cache[key]
+            del self.cache_metadata[key]
+            self._current_size -= entry_size
     
     def get(self, data_type, params, max_age_hours=24):
-        """Get data from cache if available and not expired"""
+        """Return cached data if present and not expired, else None."""
         cache_key = self._generate_cache_key(data_type, params)
         
         if cache_key in self.cache:
             metadata = self.cache_metadata.get(cache_key, {})
             timestamp = metadata.get('timestamp', datetime.min)
             
-            # Check if cache is still valid
             if datetime.now() - timestamp < timedelta(hours=max_age_hours):
                 try:
-                    compressed_data = self.cache[cache_key]
-                    data = self._decompress_data(compressed_data)
+                    data = self._decompress_data(self.cache[cache_key])
                     if data is not None:
                         return data
                 except Exception as e:
                     st.warning(f"Cache decompression failed: {str(e)}")
-                    # Remove corrupted cache entry
+                    # Remove corrupted entry and update size counter
+                    self._current_size -= len(self.cache[cache_key])
                     del self.cache[cache_key]
                     del self.cache_metadata[cache_key]
         
         return None
     
     def set(self, data_type, params, data):
-        """Store data in cache with compression"""
+        """Store data in cache with compression."""
         cache_key = self._generate_cache_key(data_type, params)
         
         try:
@@ -345,15 +341,22 @@ class DataCache:
             if compressed_data is None:
                 return False
             
-            # Check if adding this would exceed cache size
-            if self._get_cache_size() + len(compressed_data) > self.max_cache_size:
+            new_size = len(compressed_data)
+            
+            # If this key already exists, subtract old size first
+            if cache_key in self.cache:
+                self._current_size -= len(self.cache[cache_key])
+            
+            # Evict if needed before storing
+            if self._current_size + new_size > self.max_cache_size:
                 self._cleanup_cache()
             
             self.cache[cache_key] = compressed_data
+            self._current_size += new_size
             self.cache_metadata[cache_key] = {
                 'timestamp': datetime.now(),
                 'data_type': data_type,
-                'size_bytes': len(compressed_data),
+                'size_bytes': new_size,
                 'original_size': len(pickle.dumps(data)) if data is not None else 0
             }
             
@@ -364,22 +367,21 @@ class DataCache:
             return False
     
     def get_cache_stats(self):
-        """Get cache statistics"""
-        total_compressed = self._get_cache_size()
+        """Return cache statistics."""
         total_original = sum(meta.get('original_size', 0) for meta in self.cache_metadata.values())
-        compression_ratio = (1 - total_compressed / total_original) * 100 if total_original > 0 else 0
+        compression_ratio = (1 - self._current_size / total_original) * 100 if total_original > 0 else 0
         
         return {
             'total_entries': len(self.cache),
-            'compressed_size_mb': total_compressed / (1024 * 1024),
+            'compressed_size_mb': self._current_size / (1024 * 1024),
             'original_size_mb': total_original / (1024 * 1024),
             'compression_ratio': compression_ratio,
-            'cache_utilization': (total_compressed / self.max_cache_size) * 100
+            'cache_utilization': (self._current_size / self.max_cache_size) * 100
         }
 
 class RateLimiter:
     """Rate limiter to prevent API throttling"""
-    def __init__(self, max_requests_per_second=8):
+    def __init__(self, max_requests_per_second=RATE_LIMIT_RPS):
         self.max_requests = max_requests_per_second
         self.request_times = []
         self.lock = threading.Lock()
@@ -400,7 +402,7 @@ class RateLimiter:
             
             self.request_times.append(current_time)
 
-def rate_limited(max_requests_per_second=8):
+def rate_limited(max_requests_per_second=RATE_LIMIT_RPS):
     """Decorator to rate limit API calls"""
     limiter = RateLimiter(max_requests_per_second)
     
@@ -433,7 +435,7 @@ class SprintMonitoringAPI:
         self.project = project_name or "Shiptech"
         self.base_url = f"https://dev.azure.com/{self.organization}"
         self.cancellable_request = CancellableRequest()
-        self.rate_limiter = RateLimiter(max_requests_per_second=8)  # Azure DevOps limit
+        self.rate_limiter = RateLimiter(max_requests_per_second=RATE_LIMIT_RPS)  # Azure DevOps limit
         
     def get_auth_headers(self):
         credentials = f":{self.pat}"
@@ -482,7 +484,7 @@ class SprintMonitoringAPI:
         if self.cancellable_request.is_cancelled():
             raise Exception("Request was cancelled")
     
-    @rate_limited(8)
+    @rate_limited(RATE_LIMIT_RPS)
     def get_projects(self):
         """Get all projects in the organization"""
         # Try to get from cache first
@@ -505,7 +507,7 @@ class SprintMonitoringAPI:
             st.error(f"Error getting projects: {response.status_code}")
             return []
     
-    @rate_limited(8)
+    @rate_limited(RATE_LIMIT_RPS)
     def get_teams(self):
         """Get all teams in the project"""
         # Try to get from cache first
@@ -529,7 +531,7 @@ class SprintMonitoringAPI:
             st.error(f"Error getting teams: {response.status_code}")
             return []
     
-    @rate_limited(8)
+    @rate_limited(RATE_LIMIT_RPS)
     def get_iterations_for_team(self, team_name):
         """Get iterations for a specific team"""
         # Try to get from cache first
@@ -551,76 +553,62 @@ class SprintMonitoringAPI:
             st.error(f"Error getting iterations for team {team_name}: {response.status_code}")
             return []
     
-    @rate_limited(8)
-    def get_work_items(self, iteration_path):
-        """Get work items for a specific iteration path"""
-        # Try to get from cache first
-        cache_params = {'organization': self.organization, 'project': self.project, 'iteration_path': iteration_path}
-        cached_data = st.session_state.data_cache.get('work_item_ids', cache_params)
+    @rate_limited(RATE_LIMIT_RPS)
+    def get_work_items(self, iteration_path, tasks_only: bool = True):
+        """Get work item IDs for an iteration path.
+
+        Args:
+            iteration_path: Azure DevOps iteration path string.
+            tasks_only: When True (default), restricts results to Task work items only.
+                        When False, returns all work item types.
+        """
+        cache_type = 'work_item_ids' if tasks_only else 'all_work_item_ids'
+        cache_flag = 'work_item_ids_cache_shown' if tasks_only else 'all_work_item_ids_cache_shown'
+        cache_params = {
+            'organization': self.organization,
+            'project': self.project,
+            'iteration_path': iteration_path,
+            'tasks_only': tasks_only,
+        }
+        cached_data = st.session_state.data_cache.get(cache_type, cache_params)
         if cached_data is not None:
-            # Only show cache message once per session to avoid spam
-            if 'work_item_ids_cache_shown' not in st.session_state:
+            if cache_flag not in st.session_state:
                 st.success("⚡ Fast loading from cache")
-                st.session_state.work_item_ids_cache_shown = True
+                st.session_state[cache_flag] = True
             return cached_data
-        
-        # If not in cache, fetch from API
+
         url = f"{self.base_url}/{self.project}/_apis/wit/wiql?api-version=7.0"
+        type_filter = " AND [System.WorkItemType] = 'Task'" if tasks_only else ""
         query = {
-            "query": f"SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '{self.project}' AND [System.IterationPath] = '{iteration_path}' AND [System.WorkItemType] = 'Task'"
+            "query": (
+                f"SELECT [System.Id] FROM WorkItems "
+                f"WHERE [System.TeamProject] = '{self.project}' "
+                f"AND [System.IterationPath] = '{iteration_path}'"
+                f"{type_filter}"
+            )
         }
         response = self.make_post_request(url, json_data=query)
         if response.status_code == 200:
-            work_items = response.json().get('workItems', [])
-            work_item_ids = [item['id'] for item in work_items]
-            
-            # Store in cache
-            st.session_state.data_cache.set('work_item_ids', cache_params, work_item_ids)
+            work_item_ids = [item['id'] for item in response.json().get('workItems', [])]
+            st.session_state.data_cache.set(cache_type, cache_params, work_item_ids)
             return work_item_ids
         else:
             st.error(f"Error getting work items: {response.status_code}")
             return []
-    
-    @rate_limited(8)
+
     def get_all_work_items(self, iteration_path):
-        """Get all work items (not just tasks) for a specific iteration path"""
-        # Try to get from cache first
-        cache_params = {'organization': self.organization, 'project': self.project, 'iteration_path': iteration_path, 'all_types': True}
-        cached_data = st.session_state.data_cache.get('all_work_item_ids', cache_params)
-        if cached_data is not None:
-            # Only show cache message once per session to avoid spam
-            if 'all_work_item_ids_cache_shown' not in st.session_state:
-                st.success("⚡ Fast loading from cache")
-                st.session_state.all_work_item_ids_cache_shown = True
-            return cached_data
-        
-        # If not in cache, fetch from API
-        url = f"{self.base_url}/{self.project}/_apis/wit/wiql?api-version=7.0"
-        query = {
-            "query": f"SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '{self.project}' AND [System.IterationPath] = '{iteration_path}'"
-        }
-        response = self.make_post_request(url, json_data=query)
-        if response.status_code == 200:
-            work_items = response.json().get('workItems', [])
-            work_item_ids = [item['id'] for item in work_items]
-            
-            # Store in cache
-            st.session_state.data_cache.set('all_work_item_ids', cache_params, work_item_ids)
-            return work_item_ids
-        else:
-            st.error(f"Error getting all work items: {response.status_code}")
-            return []
-    
+        """Get all work items (not just tasks) — delegates to get_work_items(tasks_only=False)."""
+        return self.get_work_items(iteration_path, tasks_only=False)
+
     def get_all_work_items_simple(self, iteration_path):
-        """Simple method to get all work items without caching"""
+        """Get all work item IDs without caching (used for lightweight one-off fetches)."""
         url = f"{self.base_url}/{self.project}/_apis/wit/wiql?api-version=7.0"
         query = {
             "query": f"SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '{self.project}' AND [System.IterationPath] = '{iteration_path}'"
         }
         response = self.make_post_request(url, json_data=query)
         if response.status_code == 200:
-            work_items = response.json().get('workItems', [])
-            return [item['id'] for item in work_items]
+            return [item['id'] for item in response.json().get('workItems', [])]
         else:
             st.error(f"Error getting all work items: {response.status_code}")
             return []
@@ -647,10 +635,9 @@ class SprintMonitoringAPI:
         
         # If not in cache, fetch from API
         all_details = []
-        batch_size = 200
-        for i in range(0, len(work_item_ids), batch_size):
-            self.rate_limiter.wait_if_needed()  # Rate limit each batch
-            batch_ids = work_item_ids[i:i+batch_size]
+        for i in range(0, len(work_item_ids), WORK_ITEM_BATCH_SIZE):
+            self.rate_limiter.wait_if_needed()
+            batch_ids = work_item_ids[i:i+WORK_ITEM_BATCH_SIZE]
             ids_str = ",".join(map(str, batch_ids))
             url = f"{self.base_url}/_apis/wit/workitems?ids={ids_str}&$expand=all&api-version=7.1"
             response = self.make_request(url)
@@ -705,7 +692,7 @@ class SprintMonitoringAPI:
         result = [cached_work_items[wid] for wid in work_item_ids if wid in cached_work_items]
         return result
     
-    @rate_limited(8)
+    @rate_limited(RATE_LIMIT_RPS)
     def get_child_task_details(self, child_ids):
         """Get details for child tasks"""
         if not child_ids:
@@ -778,13 +765,12 @@ class SprintMonitoringAPI:
         
         # Get work item details in batch first
         work_item_details = {}
-        batch_size = 200
         
-        for i in range(0, len(work_item_ids), batch_size):
+        for i in range(0, len(work_item_ids), WORK_ITEM_BATCH_SIZE):
             try:
                 self.check_cancellation()
-                self.rate_limiter.wait_if_needed()  # Rate limit each batch
-                batch_ids = work_item_ids[i:i+batch_size]
+                self.rate_limiter.wait_if_needed()
+                batch_ids = work_item_ids[i:i+WORK_ITEM_BATCH_SIZE]
                 ids_string = ','.join(map(str, batch_ids))
                 
                 work_items_url = f"{self.base_url}/_apis/wit/workItems?ids={ids_string}&$expand=all&api-version=7.1"
@@ -929,15 +915,20 @@ class SprintMonitoringAPI:
 
         task_updates = []
         
+        # Pre-compute sprint date range once — not inside the per-work-item loop
+        sprint_dates = [
+            start_date + timedelta(days=x)
+            for x in range((end_date - start_date).days + 1)
+        ]
+        
         # Get work item details in batch first
         work_item_details = {}
-        batch_size = 200
         
-        for i in range(0, len(work_item_ids), batch_size):
+        for i in range(0, len(work_item_ids), WORK_ITEM_BATCH_SIZE):
             try:
                 self.check_cancellation()
-                self.rate_limiter.wait_if_needed()  # Rate limit each batch
-                batch_ids = work_item_ids[i:i+batch_size]
+                self.rate_limiter.wait_if_needed()
+                batch_ids = work_item_ids[i:i+WORK_ITEM_BATCH_SIZE]
                 ids_string = ','.join(map(str, batch_ids))
                 
                 work_items_url = f"{self.base_url}/_apis/wit/workItems?ids={ids_string}&$expand=all&api-version=7.1"
@@ -1006,8 +997,8 @@ class SprintMonitoringAPI:
                                         'update_time': update_datetime.strftime('%H:%M')
                                     })
                     
-                    # Process all dates in the sprint period
-                    for current_date in [start_date + timedelta(days=x) for x in range((end_date - start_date).days + 1)]:
+                    # Process all dates in the sprint period using pre-computed list
+                    for current_date in sprint_dates:
                         # Find all revisions with completed_work changes for this specific date
                         day_revisions = [item for item in completed_work_history if item['date'] == current_date]
                         
@@ -1069,7 +1060,7 @@ class SprintMonitoringAPI:
         st.session_state.data_cache.set('work_item_history_sprint', cache_params, task_updates)
         return task_updates
 
-    @rate_limited(8)
+    @rate_limited(RATE_LIMIT_RPS)
     def get_sprint_details(self, team_name, iteration_name):
         """Get sprint start and end dates from Azure DevOps"""
         # Try to get from cache first
@@ -1196,15 +1187,14 @@ def create_summary_stats(df):
 
 def detect_parent_child_state_warnings(parent_child_data, work_items_data):
     """
-    Detect parent work items in Proposed/Planned state while child tasks are in more advanced states
-    Returns list of warning objects with details about problematic parent-child combinations
+    Detect parent work items in Proposed/Planned state while child tasks are in more advanced states.
+    Uses dict-based O(1) lookups instead of nested iteration.
     """
     warnings = []
     
     if parent_child_data is None or parent_child_data.empty:
         return warnings
     
-    # Define state progression (earlier states to later states)
     state_progression = {
         'Proposed': 0,
         'Planned': 1,
@@ -1215,59 +1205,47 @@ def detect_parent_child_state_warnings(parent_child_data, work_items_data):
         'Completed': 4
     }
     
-    # Get all child tasks from work_items_data
-    child_tasks = {}
+    # Build O(1) lookup: task_id → task info
+    child_tasks: dict = {}
     if work_items_data:
         for item in work_items_data:
             if item.get('fields', {}).get('System.WorkItemType') == 'Task':
                 child_tasks[item['id']] = {
-                    'title': item.get('fields', {}).get('System.Title', 'Unknown'),
-                    'state': item.get('fields', {}).get('System.State', 'Unknown'),
-                    'assigned_to': item.get('fields', {}).get('System.AssignedTo', {}).get('displayName', 'Unassigned')
+                    'title': item['fields'].get('System.Title', 'Unknown'),
+                    'state': item['fields'].get('System.State', 'Unknown'),
+                    'assigned_to': item['fields'].get('System.AssignedTo', {}).get('displayName', 'Unassigned')
                 }
     
-    # Check each parent work item
+    # Build O(1) lookup: parent_id → [child_ids]
+    child_to_parent = getattr(st.session_state, 'child_to_parent_mapping', {})
+    parent_to_children: dict = {}
+    for child_id, parent_id in child_to_parent.items():
+        parent_to_children.setdefault(parent_id, []).append(child_id)
+    
+    # Single pass through parents — O(n)
     for _, parent_row in parent_child_data.iterrows():
         parent_id = parent_row['ID']
-        parent_title = parent_row['Title']
         parent_state = parent_row['State']
         
-        # Only check parents in Proposed or Planned state
-        if parent_state in ['Proposed', 'Planned']:
-            # Find child tasks for this parent
-            child_tasks_for_parent = []
-            for child_id, child_info in child_tasks.items():
-                # Check if this child belongs to the current parent
-                # This would need to be determined from the parent-child relationships
-                # For now, we'll use a simplified approach
-                if hasattr(st.session_state, 'child_to_parent_mapping'):
-                    if st.session_state.child_to_parent_mapping.get(child_id) == parent_id:
-                        child_tasks_for_parent.append({
-                            'id': child_id,
-                            'title': child_info['title'],
-                            'state': child_info['state'],
-                            'assigned_to': child_info['assigned_to']
-                        })
-            
-            # Check if any child tasks are in more advanced states
-            problematic_children = []
-            for child in child_tasks_for_parent:
-                child_state = child['state']
-                parent_state_level = state_progression.get(parent_state, 0)
-                child_state_level = state_progression.get(child_state, 0)
-                
-                if child_state_level > parent_state_level:
-                    problematic_children.append(child)
-            
-            # If we found problematic children, create a warning
-            if problematic_children:
-                warnings.append({
-                    'parent_id': parent_id,
-                    'parent_title': parent_title,
-                    'parent_state': parent_state,
-                    'problematic_children': problematic_children,
-                    'severity': 'high' if parent_state == 'Proposed' else 'medium'
-                })
+        if parent_state not in ('Proposed', 'Planned'):
+            continue
+        
+        parent_state_level = state_progression.get(parent_state, 0)
+        problematic_children = []
+        
+        for child_id in parent_to_children.get(parent_id, []):
+            child_info = child_tasks.get(child_id)
+            if child_info and state_progression.get(child_info['state'], 0) > parent_state_level:
+                problematic_children.append({'id': child_id, **child_info})
+        
+        if problematic_children:
+            warnings.append({
+                'parent_id': parent_id,
+                'parent_title': parent_row['Title'],
+                'parent_state': parent_state,
+                'problematic_children': problematic_children,
+                'severity': 'high' if parent_state == 'Proposed' else 'medium'
+            })
     
     return warnings
 
@@ -1565,92 +1543,67 @@ def display_metrics(df):
     """Display key metrics in cards"""
     if df.empty:
         return
-    
-    # Calculate work item type-wise counts
-    tasks_df = df[df['WorkItemType'] == 'Task']
-    requirements_df = df[df['WorkItemType'] == 'Requirement']
-    change_requests_df = df[df['WorkItemType'] == 'Change Request']
-    bugs_df = df[df['WorkItemType'] == 'Bug']
-    features_df = df[df['WorkItemType'] == 'Feature']
-    
+
     # Calculate totals for tasks only (for estimates)
+    tasks_df = df[df['WorkItemType'] == 'Task']
     total_remaining = tasks_df['RemainingWork'].sum()
     total_completed = tasks_df['CompletedWork'].sum()
     total_original_estimate = tasks_df['OriginalEstimate'].sum()
     total_estimate = total_remaining + total_completed
     progress_percentage = (total_completed / total_estimate * 100) if total_estimate > 0 else 0
-    
-    # Display work item type counts
+
+    # ---------------------------------------------------------------------------
+    # Dynamic Work Item Type Breakdown
+    # Discovers all types present in the data and renders one card per type,
+    # so User Stories, Tech Debt, or any other custom type automatically appears.
+    # ---------------------------------------------------------------------------
     st.subheader("📊 Work Item Type Breakdown")
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        with st.container():
-            st.markdown("""
-            <div style="
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                padding: 1.5rem;
-                border-radius: 10px;
-                text-align: center;
-                color: white;
-                margin-bottom: 1rem;
-                box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-            ">
-                <h2 style="margin: 0; font-size: 2.5rem; font-weight: bold;">{}</h2>
-                <p style="margin: 0; font-size: 1.1rem; opacity: 0.9;">Total Tasks</p>
-            </div>
-            """.format(len(tasks_df)), unsafe_allow_html=True)
-    
-    with col2:
-        with st.container():
-            st.markdown("""
-            <div style="
-                background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-                padding: 1.5rem;
-                border-radius: 10px;
-                text-align: center;
-                color: white;
-                margin-bottom: 1rem;
-                box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-            ">
-                <h2 style="margin: 0; font-size: 2.5rem; font-weight: bold;">{}</h2>
-                <p style="margin: 0; font-size: 1.1rem; opacity: 0.9;">Requirements & Change Requests</p>
-            </div>
-            """.format(len(requirements_df) + len(change_requests_df)), unsafe_allow_html=True)
-    
-    with col3:
-        with st.container():
-            st.markdown("""
-            <div style="
-                background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
-                padding: 1.5rem;
-                border-radius: 10px;
-                text-align: center;
-                color: white;
-                margin-bottom: 1rem;
-                box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-            ">
-                <h2 style="margin: 0; font-size: 2.5rem; font-weight: bold;">{}</h2>
-                <p style="margin: 0; font-size: 1.1rem; opacity: 0.9;">Total Bugs</p>
-            </div>
-            """.format(len(bugs_df)), unsafe_allow_html=True)
-    
-    with col4:
-        with st.container():
-            st.markdown("""
-            <div style="
-                background: linear-gradient(135deg, #fa709a 0%, #fee140 100%);
-                padding: 1.5rem;
-                border-radius: 10px;
-                text-align: center;
-                color: white;
-                margin-bottom: 1rem;
-                box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-            ">
-                <h2 style="margin: 0; font-size: 2.5rem; font-weight: bold;">{}</h2>
-                <p style="margin: 0; font-size: 1.1rem; opacity: 0.9;">Total Work Items</p>
-            </div>
-            """.format(len(df)), unsafe_allow_html=True)
+
+    # Gradient palette — cycles if there are more types than colors defined
+    _CARD_GRADIENTS = [
+        ("135deg", "#667eea", "#764ba2"),   # purple
+        ("135deg", "#f093fb", "#f5576c"),   # pink-red
+        ("135deg", "#4facfe", "#00f2fe"),   # blue-cyan
+        ("135deg", "#43e97b", "#38f9d7"),   # green-teal
+        ("135deg", "#fa709a", "#fee140"),   # pink-yellow
+        ("135deg", "#a18cd1", "#fbc2eb"),   # lavender
+        ("135deg", "#ffecd2", "#fcb69f"),   # peach
+        ("135deg", "#a1c4fd", "#c2e9fb"),   # sky blue
+    ]
+
+    def _card_html(count: int, label: str, gradient_idx: int) -> str:
+        angle, c1, c2 = _CARD_GRADIENTS[gradient_idx % len(_CARD_GRADIENTS)]
+        return f"""
+        <div style="
+            background: linear-gradient({angle}, {c1} 0%, {c2} 100%);
+            padding: 1.5rem;
+            border-radius: 10px;
+            text-align: center;
+            color: white;
+            margin-bottom: 1rem;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        ">
+            <h2 style="margin: 0; font-size: 2.5rem; font-weight: bold;">{count}</h2>
+            <p style="margin: 0; font-size: 1.1rem; opacity: 0.9;">{label}</p>
+        </div>"""
+
+    # Collect per-type counts — version-agnostic (works with pandas 2.x and 1.x)
+    vc = df['WorkItemType'].value_counts()
+    cards = [(str(wtype), int(cnt)) for wtype, cnt in vc.items()]
+    cards.append(("Total Work Items", len(df)))
+
+    # Render up to 4 cards per row
+    cols_per_row = 4
+    for row_start in range(0, len(cards), cols_per_row):
+        row_cards = cards[row_start:row_start + cols_per_row]
+        cols = st.columns(len(row_cards))
+        for col_idx, (label, count) in enumerate(row_cards):
+            gradient_idx = row_start + col_idx
+            with cols[col_idx]:
+                st.markdown(
+                    _card_html(count, label, gradient_idx),
+                    unsafe_allow_html=True
+                )
     
     # Display task-based estimates
     st.subheader("⏱️ Task-Based Estimates")
@@ -1804,53 +1757,53 @@ def show_task_details(team_member, date, hours):
         with st.expander(f"📋 Task Details for {team_member} on {date.strftime('%B %d, %Y')} (Total: {hours}h)", expanded=True):
             show_task_details_dialog(team_member, date, hours)
 
+def _init_session_state():
+    """Initialize all session-state keys with their defaults in one place."""
+    defaults = {
+        # Selection state
+        'selected_project': None,
+        'selected_team': None,
+        'selected_iter_name': None,
+        'selected_iter_path': None,
+        # Work item data
+        'work_item_ids': [],
+        'all_work_item_ids': [],
+        'sprint_data': None,
+        'work_items_data': None,
+        'daily_progress_data': None,
+        'parent_child_data': None,
+        # Tab & API
+        'active_tab': "Sprint Metrics",
+        'api_instance': None,
+        'available_projects': [],
+        # Lazy-load flags
+        'sprint_data_loaded': False,
+        'work_items_data_loaded': False,
+        'daily_progress_data_loaded': False,
+    }
+    for key, default in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = default
+    
+    # Cache is a class instance — initialize separately
+    if 'data_cache' not in st.session_state:
+        st.session_state.data_cache = DataCache()
+
+
+def _reset_cache_flags():
+    """Remove all one-shot cache-hit notification flags from session state."""
+    for flag in CACHE_FLAG_KEYS:
+        st.session_state.pop(flag, None)
+
+
 def main():
     # Using default Streamlit styling
     
     # Show logout button
     show_logout_button()
     
-    # Initialize session state for project selection, teams, and iterations
-    if 'selected_project' not in st.session_state:
-        st.session_state.selected_project = None
-    if 'selected_team' not in st.session_state:
-        st.session_state.selected_team = None
-    if 'selected_iter_name' not in st.session_state:
-        st.session_state.selected_iter_name = None
-    if 'selected_iter_path' not in st.session_state:
-        st.session_state.selected_iter_path = None
-    if 'work_item_ids' not in st.session_state:
-        st.session_state.work_item_ids = []
-    if 'all_work_item_ids' not in st.session_state:
-        st.session_state.all_work_item_ids = []
-    if 'sprint_data' not in st.session_state:
-        st.session_state.sprint_data = None
-    if 'work_items_data' not in st.session_state:
-        st.session_state.work_items_data = None
-    if 'daily_progress_data' not in st.session_state:
-        st.session_state.daily_progress_data = None
-    if 'parent_child_data' not in st.session_state:
-        st.session_state.parent_child_data = None
-
-    # Tab state management for native tabs
-    if 'active_tab' not in st.session_state:
-        st.session_state.active_tab = "Sprint Metrics"
-    if 'api_instance' not in st.session_state:
-        st.session_state.api_instance = None
-    if 'available_projects' not in st.session_state:
-        st.session_state.available_projects = []
-    
-    # Data loading states for lazy loading
-    if 'sprint_data_loaded' not in st.session_state:
-        st.session_state.sprint_data_loaded = False
-    if 'work_items_data_loaded' not in st.session_state:
-        st.session_state.work_items_data_loaded = False
-    if 'daily_progress_data_loaded' not in st.session_state:
-        st.session_state.daily_progress_data_loaded = False
-
-    # Initialize data cache for compression and caching
-    if 'data_cache' not in st.session_state:
-        st.session_state.data_cache = DataCache(max_cache_size_mb=50)
+    # Initialize all session state in one call
+    _init_session_state()
 
     st.title("📊 Sprint Monitoring Dashboard")
     
@@ -1909,25 +1862,13 @@ def main():
         st.session_state.work_items_data_loaded = False
         st.session_state.daily_progress_data_loaded = False
         
-        # Reset cache message flags
-        cache_flags = [
-            'work_item_details_cache_shown',
-            'work_item_ids_cache_shown',
-            'all_work_item_ids_cache_shown',
-            'child_task_details_cache_shown',
-            'work_item_history_cache_shown',
-            'work_item_history_sprint_cache_shown'
-        ]
-        for flag in cache_flags:
-            if flag in st.session_state:
-                del st.session_state[flag]
+        _reset_cache_flags()
         
         # Reset dependent cached data to ensure fresh loads
         st.session_state.api_instance = None
         st.session_state.available_teams = []
         st.session_state.last_selected_project = None
-        if 'available_iterations' in st.session_state:
-            del st.session_state.available_iterations
+        st.session_state.pop('available_iterations', None)
     
     valid_project_selected = selected_project and selected_project != "-- Select --"
     
@@ -1974,8 +1915,7 @@ def main():
             st.session_state.work_items_data_loaded = False
             st.session_state.daily_progress_data_loaded = False
             # Clear available iterations when team changes
-            if 'available_iterations' in st.session_state:
-                del st.session_state.available_iterations
+            st.session_state.pop('available_iterations', None)
         
         if selected_team and selected_team != "-- Select --":
             # Load iterations automatically when team is selected
@@ -2028,7 +1968,6 @@ def main():
                         col2a, col2b = st.columns(2)
                         with col2a:
                             if st.button("🔄 Refresh All Data", key="refresh_all_data", use_container_width=True):
-                                # Clear all cached data
                                 st.session_state.work_item_ids = []
                                 st.session_state.all_work_item_ids = []
                                 st.session_state.sprint_data = None
@@ -2037,27 +1976,14 @@ def main():
                                 st.session_state.sprint_data_loaded = False
                                 st.session_state.work_items_data_loaded = False
                                 st.session_state.daily_progress_data_loaded = False
-                                
-                                # Reset cache message flags
-                                cache_flags = [
-                                    'work_item_details_cache_shown',
-                                    'work_item_ids_cache_shown',
-                                    'all_work_item_ids_cache_shown',
-                                    'child_task_details_cache_shown',
-                                    'work_item_history_cache_shown',
-                                    'work_item_history_sprint_cache_shown'
-                                ]
-                                for flag in cache_flags:
-                                    if flag in st.session_state:
-                                        del st.session_state[flag]
-                                
+                                _reset_cache_flags()
                                 st.rerun()
                         with col2b:
                             if st.button("🗑️ Clear API Cache", key="clear_api_cache", use_container_width=True):
-                                # Clear API cache
                                 if hasattr(st.session_state, 'data_cache'):
                                     st.session_state.data_cache.cache.clear()
                                     st.session_state.data_cache.cache_metadata.clear()
+                                    st.session_state.data_cache._current_size = 0
                                 st.success("✅ API cache cleared!")
                                 st.rerun()
                     
