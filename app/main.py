@@ -1136,6 +1136,7 @@ def process_work_item_data(raw_data):
             'OriginalEstimate': fields.get('Microsoft.VSTS.Scheduling.OriginalEstimate', 0) or 0,
             'RemainingWork': fields.get('Microsoft.VSTS.Scheduling.RemainingWork', 0) or 0,
             'CompletedWork': fields.get('Microsoft.VSTS.Scheduling.CompletedWork', 0) or 0,
+            'StoryPoints': fields.get('Microsoft.VSTS.Scheduling.StoryPoints', 0) or 0,
             'ChangedDate': fields.get('System.ChangedDate'),
         })
     
@@ -1769,6 +1770,91 @@ def display_workload_balance_chart(df):
         height=max(250, len(summary) * 38),
     )
     st.plotly_chart(fig, use_container_width=True)
+
+
+def display_story_points_by_user(df):
+    """Render story point summary per team member from user story work items."""
+    st.subheader("🎯 Story Points by Team Member")
+
+    STORY_TYPES = ['Requirement', 'User Story', 'Feature']
+    DELIVERED_STATES = {'Closed', 'Resolved', 'Done', 'Completed'}
+    PENDING_STATES = {'Active', 'New', 'Proposed', 'Planned'}
+
+    stories_df = df[df['WorkItemType'].isin(STORY_TYPES)].copy()
+
+    if stories_df.empty:
+        st.info("No user story / requirement work items found in this sprint.")
+        return
+
+    # Sprint-level totals
+    total_sp = stories_df['StoryPoints'].sum()
+    delivered_sp = stories_df[stories_df['State'].isin(DELIVERED_STATES)]['StoryPoints'].sum()
+    pending_sp = stories_df[stories_df['State'].isin(PENDING_STATES)]['StoryPoints'].sum()
+    delivery_pct = (delivered_sp / total_sp * 100) if total_sp > 0 else 0
+
+    # Summary metric cards
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("📦 Total SP", f"{total_sp:.0f}")
+    c2.metric("✅ Delivered SP", f"{delivered_sp:.0f}")
+    c3.metric("⏳ Pending SP", f"{pending_sp:.0f}")
+    c4.metric("📈 Delivery %", f"{delivery_pct:.1f}%")
+
+    # Per-user aggregation
+    def sp_agg(group):
+        return pd.Series({
+            'Total SP': group['StoryPoints'].sum(),
+            'Delivered SP': group[group['State'].isin(DELIVERED_STATES)]['StoryPoints'].sum(),
+            'Pending SP': group[group['State'].isin(PENDING_STATES)]['StoryPoints'].sum(),
+            'Story Count': len(group),
+        })
+
+    per_user = (
+        stories_df.groupby('AssignedTo')
+        .apply(sp_agg)
+        .reset_index()
+    )
+    per_user['Delivery %'] = per_user.apply(
+        lambda r: f"{r['Delivered SP'] / r['Total SP'] * 100:.1f}%" if r['Total SP'] > 0 else "0.0%",
+        axis=1
+    )
+    per_user = per_user.sort_values('Total SP', ascending=False).reset_index(drop=True)
+    per_user.index += 1
+
+    # Per-user table
+    st.write("**Per-User Breakdown:**")
+    st.dataframe(
+        per_user[['AssignedTo', 'Story Count', 'Total SP', 'Delivered SP', 'Pending SP', 'Delivery %']],
+        use_container_width=True,
+    )
+
+    # Stacked horizontal bar chart
+    assigned_users = per_user[per_user['AssignedTo'] != 'Unassigned'].sort_values('Total SP', ascending=True)
+    if not assigned_users.empty:
+        import plotly.graph_objects as go
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            y=assigned_users['AssignedTo'],
+            x=assigned_users['Delivered SP'],
+            name='Delivered SP',
+            orientation='h',
+            marker_color='#43e97b',
+        ))
+        fig.add_trace(go.Bar(
+            y=assigned_users['AssignedTo'],
+            x=assigned_users['Pending SP'],
+            name='Pending SP',
+            orientation='h',
+            marker_color='#f5a623',
+        ))
+        fig.update_layout(
+            barmode='stack',
+            xaxis_title='Story Points',
+            yaxis_title='',
+            legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+            margin=dict(l=0, r=0, t=30, b=0),
+            height=max(250, len(assigned_users) * 38),
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
 
 def make_work_item_url(id, org, base_url, project):
@@ -2423,7 +2509,10 @@ def main():
                                 # Workload Balance Chart
                                 display_workload_balance_chart(st.session_state.sprint_data)
 
-                                # Burndown Chart (uses daily progress data if already loaded)
+                                # Story Points by Team Member
+                                display_story_points_by_user(st.session_state.sprint_data)
+
+                                # Burndown Chart(uses daily progress data if already loaded)
                                 tasks_df_for_burn = st.session_state.sprint_data[
                                     st.session_state.sprint_data['WorkItemType'] == 'Task'
                                 ]
@@ -2465,6 +2554,21 @@ def main():
                                 df_tasks = st.session_state.sprint_data[
                                     st.session_state.sprint_data['WorkItemType'] == 'Task'
                                 ].copy()
+
+                                # Story points per user from user stories (for the summary table)
+                                _STORY_TYPES = ['Requirement', 'User Story', 'Feature']
+                                _DELIVERED = {'Closed', 'Resolved', 'Done', 'Completed'}
+                                df_stories_sp = st.session_state.sprint_data[
+                                    st.session_state.sprint_data['WorkItemType'].isin(_STORY_TYPES)
+                                ].copy()
+                                sp_by_user = (
+                                    df_stories_sp.groupby('AssignedTo')
+                                    .apply(lambda g: pd.Series({
+                                        'Total SP': g['StoryPoints'].sum(),
+                                        'Delivered SP': g[g['State'].isin(_DELIVERED)]['StoryPoints'].sum(),
+                                    }))
+                                    .reset_index()
+                                )
                                 
                                 if not df_tasks.empty:
                                     # Separate assigned and unassigned work items
@@ -2481,6 +2585,12 @@ def main():
                                         }).reset_index()
                                         
                                         team_summary.columns = ['Team Member', 'Task Count', 'Original Estimate (hrs)', 'Completed Work (hrs)', 'Remaining Work (hrs)']
+
+                                        # Merge story points into team summary
+                                        sp_renamed = sp_by_user.rename(columns={'AssignedTo': 'Team Member'})
+                                        team_summary = team_summary.merge(sp_renamed, on='Team Member', how='left')
+                                        team_summary['Total SP'] = team_summary['Total SP'].fillna(0).astype(int)
+                                        team_summary['Delivered SP'] = team_summary['Delivered SP'].fillna(0).astype(int)
                                         
                                         # Reset index for numbering starting from 1
                                         team_summary = team_summary.reset_index(drop=True)
