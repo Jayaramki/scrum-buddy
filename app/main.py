@@ -1697,11 +1697,22 @@ def display_burndown_chart(start_date, end_date, daily_progress_data, total_esti
             marker=dict(size=6),
         ))
 
-    # Today marker
+    # Today marker — use add_shape + add_annotation to avoid plotly bug with
+    # add_vline annotation on date axes (shapeannotation._mean ZeroDivisionError)
     if start_date <= today <= end_date:
-        fig.add_vline(
-            x=str(today), line_width=1, line_dash='dot', line_color='#f5576c',
-            annotation_text='Today', annotation_position='top right'
+        fig.add_shape(
+            type='line',
+            x0=str(today), x1=str(today),
+            y0=0, y1=1,
+            xref='x', yref='paper',
+            line=dict(width=1, dash='dot', color='#f5576c'),
+        )
+        fig.add_annotation(
+            x=str(today), y=1,
+            xref='x', yref='paper',
+            text='Today', showarrow=False,
+            xanchor='left', yanchor='top',
+            font=dict(color='#f5576c'),
         )
 
     fig.update_layout(
